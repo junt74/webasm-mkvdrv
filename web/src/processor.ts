@@ -5,11 +5,6 @@ type ConfigureMessage = {
   noteFrequencies: Float32Array;
 };
 
-type DemoStep = {
-  note: number | null;
-  length: number;
-};
-
 type StartToneMessage = {
   type: "startTone";
 };
@@ -17,9 +12,9 @@ type StartToneMessage = {
 type StartSequenceMessage = {
   type: "startSequence";
   bpm: number;
-  stepsPerBeat: number;
-  gateRatio: number;
-  sequence: DemoStep[];
+  ticksPerBeat: number;
+  sequenceEvents: Uint32Array;
+  eventStride: number;
 };
 
 type StopMessage = {
@@ -47,8 +42,13 @@ type ProcessorMessage =
 type PlaybackMode = "idle" | "tone" | "sequence";
 
 class MkvdrvProcessor extends AudioWorkletProcessor {
+  private static readonly EVENT_NOTE_ON = 1;
+  private static readonly EVENT_NOTE_OFF = 2;
+
   private wavetable = new Float32Array([0]);
   private noteFrequencies = new Float32Array(128);
+  private sequenceEvents = new Uint32Array(0);
+  private eventStride = 3;
   private phase = 0;
   private frequency = 440;
   private mode: PlaybackMode = "idle";
@@ -57,12 +57,9 @@ class MkvdrvProcessor extends AudioWorkletProcessor {
   private attackRate = 0.0035;
   private releaseRate = 0.0018;
   private bpm = 124;
-  private stepsPerBeat = 4;
-  private gateRatio = 0.82;
-  private sequence: DemoStep[] = [];
+  private ticksPerBeat = 96;
   private sequenceIndex = 0;
-  private stepSamplesRemaining = 0;
-  private gateSamplesRemaining = 0;
+  private eventSamplesRemaining = 0;
   private sequenceFrequency = 0;
 
   constructor() {
@@ -91,15 +88,14 @@ class MkvdrvProcessor extends AudioWorkletProcessor {
       if (message.type === "startSequence") {
         this.mode = "sequence";
         this.bpm = message.bpm;
-        this.stepsPerBeat = message.stepsPerBeat;
-        this.gateRatio = message.gateRatio;
-        this.sequence = message.sequence;
+        this.ticksPerBeat = message.ticksPerBeat;
+        this.sequenceEvents = new Uint32Array(message.sequenceEvents);
+        this.eventStride = message.eventStride;
         this.sequenceIndex = 0;
-        this.stepSamplesRemaining = 0;
-        this.gateSamplesRemaining = 0;
-        this.advanceSequenceStep();
+        this.eventSamplesRemaining = 0;
+        this.advanceSequenceEvent();
         this.port.postMessage(
-          `Sequence ready.\nTempo: ${this.bpm.toFixed(0)} BPM, steps: ${this.sequence.length}`
+          `Sequence ready.\nTempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.eventStride}`
         );
         return;
       }
@@ -124,42 +120,43 @@ class MkvdrvProcessor extends AudioWorkletProcessor {
         this.bpm = message.bpm;
 
         if (this.mode === "sequence") {
-          this.advanceSequenceStep();
           this.port.postMessage(`Sequence tempo: ${this.bpm.toFixed(0)} BPM`);
         }
       }
     };
   }
 
-  private advanceSequenceStep() {
-    if (this.sequence.length === 0) {
+  private advanceSequenceEvent() {
+    if (this.sequenceEvents.length === 0) {
       this.mode = "idle";
       this.targetAmplitude = 0;
       this.sequenceFrequency = 0;
       return;
     }
 
-    const step = this.sequence[this.sequenceIndex];
-    const stepSamples = Math.max(
+    const base = this.sequenceIndex * this.eventStride;
+    const eventKind = this.sequenceEvents[base];
+    const note = this.sequenceEvents[base + 1];
+    const lengthTicks = this.sequenceEvents[base + 2];
+    const eventSamples = Math.max(
       1,
-      Math.round((60 / this.bpm / this.stepsPerBeat) * sampleRate * step.length)
+      Math.round((60 / this.bpm / this.ticksPerBeat) * sampleRate * lengthTicks)
     );
 
-    this.stepSamplesRemaining = stepSamples;
-    this.gateSamplesRemaining = Math.max(
-      0,
-      Math.round(stepSamples * this.gateRatio)
-    );
+    this.eventSamplesRemaining = eventSamples;
 
-    if (step.note == null) {
+    if (eventKind === MkvdrvProcessor.EVENT_NOTE_ON) {
+      this.sequenceFrequency = this.noteFrequencies[note] ?? 0;
+      this.targetAmplitude = 1;
+    } else if (eventKind === MkvdrvProcessor.EVENT_NOTE_OFF) {
       this.sequenceFrequency = 0;
       this.targetAmplitude = 0;
     } else {
-      this.sequenceFrequency = this.noteFrequencies[step.note] ?? 0;
-      this.targetAmplitude = 1;
+      this.targetAmplitude = 0;
     }
 
-    this.sequenceIndex = (this.sequenceIndex + 1) % this.sequence.length;
+    this.sequenceIndex =
+      (this.sequenceIndex + 1) % (this.sequenceEvents.length / this.eventStride);
   }
 
   private currentFrequency(): number {
@@ -199,12 +196,8 @@ class MkvdrvProcessor extends AudioWorkletProcessor {
 
     for (let index = 0; index < left.length; index += 1) {
       if (this.mode === "sequence") {
-        if (this.stepSamplesRemaining <= 0) {
-          this.advanceSequenceStep();
-        }
-
-        if (this.gateSamplesRemaining <= 0) {
-          this.targetAmplitude = 0;
+        if (this.eventSamplesRemaining <= 0) {
+          this.advanceSequenceEvent();
         }
       }
 
@@ -217,8 +210,7 @@ class MkvdrvProcessor extends AudioWorkletProcessor {
         right[index] = 0;
 
         if (this.mode === "sequence") {
-          this.stepSamplesRemaining -= 1;
-          this.gateSamplesRemaining -= 1;
+          this.eventSamplesRemaining -= 1;
         }
 
         continue;
@@ -244,8 +236,7 @@ class MkvdrvProcessor extends AudioWorkletProcessor {
       }
 
       if (this.mode === "sequence") {
-        this.stepSamplesRemaining -= 1;
-        this.gateSamplesRemaining -= 1;
+        this.eventSamplesRemaining -= 1;
       }
     }
 

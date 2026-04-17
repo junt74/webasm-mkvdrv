@@ -2,7 +2,7 @@
 
 MKVDRV-Wasm は、MKVDRV の設計思想と MDSDRV-mml 互換を継承しつつ、ブラウザ上で動作する次世代サウンドドライバを Rust + WebAssembly で構築するプロジェクトです。
 
-現時点では Stage 1 の土台として、Rust/Wasm の `core` と Vite/TypeScript の `web` を分離したモノレポ構成に加え、ブラウザ上での単音再生と簡易ステップシーケンス再生まで確認できるようになっています。
+現時点では Stage 1 の土台として、Rust/Wasm の `core` と Vite/TypeScript の `web` を分離したモノレポ構成に加え、ブラウザ上での単音再生と、Rust 側で生成したノートイベント列による簡易シーケンス再生まで確認できるようになっています。
 
 ## ディレクトリ構成
 
@@ -60,7 +60,7 @@ npm run dev
 1. `cd web`
 2. `npm run dev`
 3. 表示されたページで `Start Tone` を押して単音再生を確認する
-4. `Start Demo` を押して簡易ステップシーケンス再生を確認する
+4. `Start Demo` を押して、Rust が生成したノート on/off イベント列の再生を確認する
 5. 必要に応じて周波数とテンポのスライダーを変更する
 
 Chrome / Safari 系では、ユーザー操作後に `AudioContext` が有効になるため、発音開始はボタンクリック経由にしています。
@@ -68,8 +68,8 @@ Chrome / Safari 系では、ユーザー操作後に `AudioContext` が有効に
 ## 次の実装ステップ
 
 1. `core` に複数波形・音量エンベロープ・音源状態管理を追加
-2. `web/src/processor.ts` の簡易シーケンサを、MML バイトコード受け取り型へ発展
-3. Rust 側でイベント列を生成し、AudioWorklet へ低コスト転送する
+2. `web/src/processor.ts` のイベント実行系を、MML バイトコード受け取り型へ発展
+3. Rust 側でイベント列を生成し、AudioWorklet へ低コスト転送する基盤を拡張
 4. `_reference` に MML 仕様・旧実装・ハードウェア資料を段階的に蓄積
 
 ## メモ

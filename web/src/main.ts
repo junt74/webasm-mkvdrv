@@ -52,6 +52,10 @@ type MkvdrvWasmExports = {
   mkvdrv_fill_sine_wavetable: (requestedLen: number) => number;
   mkvdrv_note_frequencies_ptr: () => number;
   mkvdrv_fill_note_frequencies: () => number;
+  mkvdrv_sequence_events_ptr: () => number;
+  mkvdrv_sequence_event_stride: () => number;
+  mkvdrv_sequence_ticks_per_beat: () => number;
+  mkvdrv_fill_demo_sequence: () => number;
 };
 
 type WasmRuntime = {
@@ -59,11 +63,9 @@ type WasmRuntime = {
   message: string;
   wavetable: Float32Array;
   noteFrequencies: Float32Array;
-};
-
-type DemoStep = {
-  note: number | null;
-  length: number;
+  sequenceEvents: Uint32Array;
+  sequenceEventStride: number;
+  sequenceTicksPerBeat: number;
 };
 
 let runtimePromise: Promise<WasmRuntime> | undefined;
@@ -79,25 +81,6 @@ const frequencyValue = document.querySelector<HTMLElement>("#frequency-value");
 const tempoInput = document.querySelector<HTMLInputElement>("#tempo");
 const tempoValue = document.querySelector<HTMLElement>("#tempo-value");
 const logOutput = document.querySelector<HTMLElement>("#log-output");
-
-const demoSequence: DemoStep[] = [
-  { note: 60, length: 1 },
-  { note: 64, length: 1 },
-  { note: 67, length: 1 },
-  { note: 72, length: 1 },
-  { note: 67, length: 1 },
-  { note: 64, length: 1 },
-  { note: 60, length: 2 },
-  { note: null, length: 1 },
-  { note: 62, length: 1 },
-  { note: 65, length: 1 },
-  { note: 69, length: 1 },
-  { note: 74, length: 1 },
-  { note: 69, length: 1 },
-  { note: 65, length: 1 },
-  { note: 62, length: 2 },
-  { note: null, length: 1 }
-];
 
 const updateLog = (message: string) => {
   if (!logOutput) {
@@ -146,8 +129,26 @@ const loadRuntime = async (): Promise<WasmRuntime> => {
         noteTableLength
       );
       const noteFrequencies = new Float32Array(noteSource);
+      const eventCount = exports.mkvdrv_fill_demo_sequence();
+      const eventStride = exports.mkvdrv_sequence_event_stride();
+      const eventPointer = exports.mkvdrv_sequence_events_ptr();
+      const eventSource = new Uint32Array(
+        exports.memory.buffer,
+        eventPointer,
+        eventCount * eventStride
+      );
+      const sequenceEvents = new Uint32Array(eventSource);
+      const sequenceTicksPerBeat = exports.mkvdrv_sequence_ticks_per_beat();
 
-      return { exports, message, wavetable, noteFrequencies };
+      return {
+        exports,
+        message,
+        wavetable,
+        noteFrequencies,
+        sequenceEvents,
+        sequenceEventStride: eventStride,
+        sequenceTicksPerBeat
+      };
     })();
   }
 
@@ -209,7 +210,7 @@ const boot = async () => {
 
     const runtime = await loadRuntime();
     updateLog(
-      `${runtime.message}\nWavetable length: ${runtime.wavetable.length} samples\nNote table: ${runtime.noteFrequencies.length} entries`
+      `${runtime.message}\nWavetable length: ${runtime.wavetable.length} samples\nNote table: ${runtime.noteFrequencies.length} entries\nSequence events: ${runtime.sequenceEvents.length / runtime.sequenceEventStride}`
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -247,17 +248,17 @@ sequenceButton?.addEventListener("click", async () => {
     node.port.postMessage({
       type: "startSequence",
       bpm: currentTempo(),
-      stepsPerBeat: 4,
-      gateRatio: 0.82,
-      sequence: demoSequence
+      ticksPerBeat: runtime.sequenceTicksPerBeat,
+      sequenceEvents: runtime.sequenceEvents,
+      eventStride: runtime.sequenceEventStride
     });
 
     updateLog(
-      `${runtime.message}\nDemo sequence started at ${currentTempo().toFixed(0)} BPM`
+      `${runtime.message}\nRust sequence started at ${currentTempo().toFixed(0)} BPM`
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    updateLog(`Failed to start demo sequence.\n${reason}`);
+    updateLog(`Failed to start Rust sequence.\n${reason}`);
   }
 });
 
