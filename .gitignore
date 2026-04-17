@@ -1,0 +1,7 @@
+/core/pkg
+node_modules/
+web/dist/
+web/public/wasm/
+target/
+.vite/
+.DS_Store

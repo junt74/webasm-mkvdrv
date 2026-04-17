@@ -1,0 +1,117 @@
+:root {
+  color-scheme: light;
+  font-family: "IBM Plex Sans JP", "Hiragino Sans", sans-serif;
+  background:
+    radial-gradient(circle at top left, rgba(255, 196, 72, 0.35), transparent 36%),
+    linear-gradient(180deg, #fbf7ef 0%, #f2ece0 100%);
+  color: #1f1b16;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+button {
+  font: inherit;
+}
+
+.layout {
+  width: min(1080px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 48px 0 64px;
+  display: grid;
+  gap: 20px;
+}
+
+.panel {
+  background: rgba(255, 251, 245, 0.86);
+  border: 1px solid rgba(107, 74, 36, 0.14);
+  border-radius: 24px;
+  padding: 28px;
+  box-shadow: 0 20px 60px rgba(68, 44, 14, 0.08);
+  backdrop-filter: blur(10px);
+}
+
+.hero h1 {
+  margin: 0;
+  font-size: clamp(2.6rem, 7vw, 4.8rem);
+  line-height: 0.94;
+  letter-spacing: -0.04em;
+}
+
+.eyebrow {
+  margin: 0 0 12px;
+  color: #8f4e17;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.lead {
+  max-width: 52rem;
+  font-size: 1.05rem;
+  line-height: 1.8;
+}
+
+.actions {
+  margin: 20px 0 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.actions button {
+  border: 0;
+  border-radius: 999px;
+  padding: 12px 20px;
+  background: linear-gradient(135deg, #b55d1f, #d39228);
+  color: white;
+  cursor: pointer;
+}
+
+.control {
+  display: grid;
+  gap: 8px;
+  max-width: 420px;
+  margin-bottom: 16px;
+}
+
+.control input {
+  width: 100%;
+}
+
+.log {
+  margin: 0;
+  padding: 16px;
+  border-radius: 16px;
+  background: #20150b;
+  color: #f8d5a5;
+  overflow-x: auto;
+}
+
+ul {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.8;
+}
+
+code {
+  font-family: "SFMono-Regular", "Cascadia Code", monospace;
+}
+
+@media (max-width: 640px) {
+  .layout {
+    width: min(100% - 20px, 1080px);
+    padding-top: 24px;
+  }
+
+  .panel {
+    padding: 20px;
+  }
+}

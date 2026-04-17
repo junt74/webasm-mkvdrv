@@ -1,0 +1,10 @@
+[package]
+name = "mkvdrv-wasm-core"
+version = "0.1.0"
+edition = "2024"
+description = "Rust/Wasm sound core for MKVDRV-Wasm"
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
