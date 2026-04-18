@@ -1,40 +1,30 @@
+mod mml;
+
 use core::f32::consts::TAU;
+use core::str;
+
+use mml::parse_mml;
+
+#[cfg(test)]
+use mml::{EVENT_NOTE_OFF, EVENT_NOTE_ON, EVENT_TEMPO};
 
 const INIT_MESSAGE: &[u8] = b"MKVDRV-Wasm core initialized";
 const WAVETABLE_CAPACITY: usize = 2048;
 const NOTE_FREQUENCY_CAPACITY: usize = 128;
 const SEQUENCE_EVENT_STRIDE: usize = 3;
-const SEQUENCE_EVENT_CAPACITY: usize = 64;
-const SEQUENCE_TICKS_PER_STEP: u32 = 24;
-const SEQUENCE_TICKS_PER_BEAT: u32 = SEQUENCE_TICKS_PER_STEP * 4;
+const SEQUENCE_EVENT_CAPACITY: usize = 128;
+const SEQUENCE_TICKS_PER_BEAT: u32 = 24;
+const MML_INPUT_CAPACITY: usize = 4096;
 const A4_INDEX: i32 = 69;
 const A4_FREQUENCY: f32 = 440.0;
-const EVENT_NOTE_ON: u32 = 1;
-const EVENT_NOTE_OFF: u32 = 2;
 
 static mut WAVETABLE: [f32; WAVETABLE_CAPACITY] = [0.0; WAVETABLE_CAPACITY];
 static mut NOTE_FREQUENCIES: [f32; NOTE_FREQUENCY_CAPACITY] = [0.0; NOTE_FREQUENCY_CAPACITY];
 static mut SEQUENCE_EVENTS: [u32; SEQUENCE_EVENT_CAPACITY * SEQUENCE_EVENT_STRIDE] =
     [0; SEQUENCE_EVENT_CAPACITY * SEQUENCE_EVENT_STRIDE];
+static mut MML_INPUT_BUFFER: [u8; MML_INPUT_CAPACITY] = [0; MML_INPUT_CAPACITY];
 
-const DEMO_STEPS: &[(Option<u32>, u32)] = &[
-    (Some(60), 1),
-    (Some(64), 1),
-    (Some(67), 1),
-    (Some(72), 1),
-    (Some(67), 1),
-    (Some(64), 1),
-    (Some(60), 2),
-    (None, 1),
-    (Some(62), 1),
-    (Some(65), 1),
-    (Some(69), 1),
-    (Some(74), 1),
-    (Some(69), 1),
-    (Some(65), 1),
-    (Some(62), 2),
-    (None, 1),
-];
+const DEMO_MML: &str = "t124 o4 l16 ceg>c<g e c r dfa>b<a f d r";
 
 #[unsafe(no_mangle)]
 pub extern "C" fn mkvdrv_init_message_ptr() -> *const u8 {
@@ -101,47 +91,43 @@ pub extern "C" fn mkvdrv_sequence_ticks_per_beat() -> u32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mkvdrv_fill_demo_sequence() -> usize {
-    let mut event_count = 0;
-
-    for (note, step_length) in DEMO_STEPS {
-        let total_ticks = step_length * SEQUENCE_TICKS_PER_STEP;
-
-        match note {
-            Some(note_value) => {
-                let gate_ticks = total_ticks * 3 / 4;
-                let release_ticks = total_ticks.saturating_sub(gate_ticks);
-
-                if event_count + 2 > SEQUENCE_EVENT_CAPACITY {
-                    break;
-                }
-
-                write_event(event_count, EVENT_NOTE_ON, *note_value, gate_ticks.max(1));
-                event_count += 1;
-
-                write_event(event_count, EVENT_NOTE_OFF, *note_value, release_ticks.max(1));
-                event_count += 1;
-            }
-            None => {
-                if event_count + 1 > SEQUENCE_EVENT_CAPACITY {
-                    break;
-                }
-
-                write_event(event_count, EVENT_NOTE_OFF, 0, total_ticks.max(1));
-                event_count += 1;
-            }
-        }
-    }
-
-    event_count
+pub extern "C" fn mkvdrv_mml_input_buffer_ptr() -> *mut u8 {
+    core::ptr::addr_of_mut!(MML_INPUT_BUFFER).cast::<u8>()
 }
 
-fn write_event(index: usize, event_kind: u32, note: u32, length_ticks: u32) {
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_mml_input_buffer_capacity() -> usize {
+    MML_INPUT_CAPACITY
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_parse_mml_from_buffer(input_len: usize) -> usize {
+    let len = input_len.min(MML_INPUT_CAPACITY);
+    let source = unsafe { str::from_utf8_unchecked(&MML_INPUT_BUFFER[..len]) };
+    fill_sequence_events_from_mml(source).unwrap_or_default()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_fill_demo_sequence() -> usize {
+    fill_sequence_events_from_mml(DEMO_MML).unwrap_or_default()
+}
+
+fn fill_sequence_events_from_mml(source: &str) -> Result<usize, mml::ParseError> {
+    let parsed = parse_mml(source, SEQUENCE_EVENT_CAPACITY)?;
+
+    for (index, event) in parsed.events.iter().enumerate() {
+        write_event(index, event.kind, event.value, event.length_ticks);
+    }
+
+    Ok(parsed.events.len())
+}
+
+fn write_event(index: usize, event_kind: u32, value: u32, length_ticks: u32) {
     let base = index * SEQUENCE_EVENT_STRIDE;
 
     unsafe {
         SEQUENCE_EVENTS[base] = event_kind;
-        SEQUENCE_EVENTS[base + 1] = note;
+        SEQUENCE_EVENTS[base + 1] = value;
         SEQUENCE_EVENTS[base + 2] = length_ticks;
     }
 }
@@ -152,7 +138,7 @@ mod tests {
 
     #[test]
     fn returns_init_message() {
-        let message = core::str::from_utf8(INIT_MESSAGE).expect("valid UTF-8");
+        let message = str::from_utf8(INIT_MESSAGE).expect("valid UTF-8");
         assert_eq!(message, "MKVDRV-Wasm core initialized");
     }
 
@@ -183,16 +169,37 @@ mod tests {
     }
 
     #[test]
-    fn fills_demo_sequence_events() {
+    fn fills_demo_sequence_from_mml() {
         let event_count = mkvdrv_fill_demo_sequence();
 
-        assert!(event_count > 0);
-        assert_eq!(unsafe { SEQUENCE_EVENTS[0] }, EVENT_NOTE_ON);
-        assert_eq!(unsafe { SEQUENCE_EVENTS[1] }, 60);
-        assert_eq!(unsafe { SEQUENCE_EVENTS[2] }, 18);
+        assert!(event_count >= 3);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[0] }, EVENT_TEMPO);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[1] }, 124);
 
-        let second_event_base = SEQUENCE_EVENT_STRIDE;
-        assert_eq!(unsafe { SEQUENCE_EVENTS[second_event_base] }, EVENT_NOTE_OFF);
-        assert_eq!(unsafe { SEQUENCE_EVENTS[second_event_base + 2] }, 6);
+        let first_note_base = SEQUENCE_EVENT_STRIDE;
+        assert_eq!(unsafe { SEQUENCE_EVENTS[first_note_base] }, EVENT_NOTE_ON);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[first_note_base + 1] }, 36);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[first_note_base + 2] }, 6);
+
+        let first_note_off_base = SEQUENCE_EVENT_STRIDE * 2;
+        assert_eq!(unsafe { SEQUENCE_EVENTS[first_note_off_base] }, EVENT_NOTE_OFF);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[first_note_off_base + 1] }, 36);
+    }
+
+    #[test]
+    fn parses_mml_from_buffer() {
+        let input = b"t150 o4 l8 c r d";
+
+        unsafe {
+            MML_INPUT_BUFFER[..input.len()].copy_from_slice(input);
+        }
+
+        let event_count = mkvdrv_parse_mml_from_buffer(input.len());
+
+        assert_eq!(event_count, 6);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[0] }, EVENT_TEMPO);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[1] }, 150);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE] }, EVENT_NOTE_ON);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE + 1] }, 36);
     }
 }

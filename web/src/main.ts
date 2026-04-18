@@ -13,11 +13,12 @@ app.innerHTML = `
       <p class="eyebrow">Stage 1 Sequencing</p>
       <h1>MKVDRV-Wasm</h1>
       <p class="lead">
-        Rust/Wasm で波形テーブルとノート周波数テーブルを生成し、AudioWorklet 側で単音再生と簡易デモシーケンスを処理する最小構成です。
+        Rust/Wasm で波形テーブルとノート周波数テーブルを生成し、AudioWorklet 側で単音再生と簡易シーケンスを処理する最小構成です。
       </p>
       <div class="actions">
         <button id="start-button" type="button">Start Tone</button>
         <button id="sequence-button" type="button">Start Demo</button>
+        <button id="mml-button" type="button">Play MML</button>
         <button id="stop-button" type="button">Stop</button>
       </div>
       <label class="control">
@@ -30,6 +31,10 @@ app.innerHTML = `
         <input id="tempo" type="range" min="80" max="180" step="1" value="124" />
         <strong id="tempo-value">124 BPM</strong>
       </label>
+      <label class="control">
+        <span>MML Input</span>
+        <textarea id="mml-input" class="mml-editor" spellcheck="false">t124 o4 l16 ceg>c<g e c r dfa>b<a f d r</textarea>
+      </label>
       <pre id="log-output" class="log">Booting MKVDRV-Wasm...</pre>
     </section>
 
@@ -37,8 +42,8 @@ app.innerHTML = `
       <h2>Signal Path</h2>
       <ul>
         <li><code>/core</code>: Rust がサイン波テーブルと MIDI ノート周波数表を生成</li>
-        <li><code>/web/src/main.ts</code>: Wasm を読み込み、AudioWorklet へ設定を送る</li>
-        <li><code>/web/src/processor.ts</code>: 単音再生と簡易ステップシーケンサを実行</li>
+        <li><code>/web/src/main.ts</code>: Wasm を読み込み、MML を入力バッファへ転送する</li>
+        <li><code>/web/src/processor.ts</code>: 単音再生とイベント列シーケンサを実行</li>
       </ul>
     </section>
   </main>
@@ -56,6 +61,9 @@ type MkvdrvWasmExports = {
   mkvdrv_sequence_event_stride: () => number;
   mkvdrv_sequence_ticks_per_beat: () => number;
   mkvdrv_fill_demo_sequence: () => number;
+  mkvdrv_mml_input_buffer_ptr: () => number;
+  mkvdrv_mml_input_buffer_capacity: () => number;
+  mkvdrv_parse_mml_from_buffer: (inputLength: number) => number;
 };
 
 type WasmRuntime = {
@@ -75,11 +83,13 @@ let workletNode: AudioWorkletNode | undefined;
 const startButton = document.querySelector<HTMLButtonElement>("#start-button");
 const sequenceButton =
   document.querySelector<HTMLButtonElement>("#sequence-button");
+const mmlButton = document.querySelector<HTMLButtonElement>("#mml-button");
 const stopButton = document.querySelector<HTMLButtonElement>("#stop-button");
 const frequencyInput = document.querySelector<HTMLInputElement>("#frequency");
 const frequencyValue = document.querySelector<HTMLElement>("#frequency-value");
 const tempoInput = document.querySelector<HTMLInputElement>("#tempo");
 const tempoValue = document.querySelector<HTMLElement>("#tempo-value");
+const mmlInput = document.querySelector<HTMLTextAreaElement>("#mml-input");
 const logOutput = document.querySelector<HTMLElement>("#log-output");
 
 const updateLog = (message: string) => {
@@ -191,6 +201,46 @@ const ensureAudioNode = async (): Promise<AudioWorkletNode> => {
   return workletNode;
 };
 
+const readSequenceEvents = (
+  runtime: WasmRuntime,
+  eventCount: number
+): Uint32Array => {
+  const eventPointer = runtime.exports.mkvdrv_sequence_events_ptr();
+  const eventSource = new Uint32Array(
+    runtime.exports.memory.buffer,
+    eventPointer,
+    eventCount * runtime.sequenceEventStride
+  );
+
+  return new Uint32Array(eventSource);
+};
+
+const parseMmlText = (runtime: WasmRuntime, source: string): Uint32Array => {
+  const encoder = new TextEncoder();
+  const encoded = encoder.encode(source);
+  const capacity = runtime.exports.mkvdrv_mml_input_buffer_capacity();
+
+  if (encoded.length > capacity) {
+    throw new Error(`MML input exceeds buffer capacity (${capacity} bytes).`);
+  }
+
+  const bufferPointer = runtime.exports.mkvdrv_mml_input_buffer_ptr();
+  const buffer = new Uint8Array(
+    runtime.exports.memory.buffer,
+    bufferPointer,
+    capacity
+  );
+  buffer.fill(0);
+  buffer.set(encoded);
+
+  const eventCount = runtime.exports.mkvdrv_parse_mml_from_buffer(encoded.length);
+  if (eventCount === 0) {
+    throw new Error("Rust parser returned no events. MML を確認してください。");
+  }
+
+  return readSequenceEvents(runtime, eventCount);
+};
+
 const configureNode = (
   node: AudioWorkletNode,
   runtime: WasmRuntime
@@ -210,7 +260,7 @@ const boot = async () => {
 
     const runtime = await loadRuntime();
     updateLog(
-      `${runtime.message}\nWavetable length: ${runtime.wavetable.length} samples\nNote table: ${runtime.noteFrequencies.length} entries\nSequence events: ${runtime.sequenceEvents.length / runtime.sequenceEventStride}`
+      `${runtime.message}\nWavetable length: ${runtime.wavetable.length} samples\nNote table: ${runtime.noteFrequencies.length} entries\nDemo sequence events: ${runtime.sequenceEvents.length / runtime.sequenceEventStride}`
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -254,11 +304,39 @@ sequenceButton?.addEventListener("click", async () => {
     });
 
     updateLog(
-      `${runtime.message}\nRust sequence started at ${currentTempo().toFixed(0)} BPM`
+      `${runtime.message}\nRust demo sequence started at ${currentTempo().toFixed(0)} BPM`
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     updateLog(`Failed to start Rust sequence.\n${reason}`);
+  }
+});
+
+mmlButton?.addEventListener("click", async () => {
+  try {
+    const runtime = await loadRuntime();
+    const node = await ensureAudioNode();
+
+    await audioContext?.resume();
+
+    configureNode(node, runtime);
+    const source = mmlInput?.value ?? "";
+    const sequenceEvents = parseMmlText(runtime, source);
+
+    node.port.postMessage({
+      type: "startSequence",
+      bpm: currentTempo(),
+      ticksPerBeat: runtime.sequenceTicksPerBeat,
+      sequenceEvents,
+      eventStride: runtime.sequenceEventStride
+    });
+
+    updateLog(
+      `${runtime.message}\nParsed MML events: ${sequenceEvents.length / runtime.sequenceEventStride}\nPlayback started from MML input.`
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    updateLog(`Failed to parse or play MML.\n${reason}`);
   }
 });
 

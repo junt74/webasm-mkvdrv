@@ -44,6 +44,7 @@ type PlaybackMode = "idle" | "tone" | "sequence";
 class MkvdrvProcessor extends AudioWorkletProcessor {
   private static readonly EVENT_NOTE_ON = 1;
   private static readonly EVENT_NOTE_OFF = 2;
+  private static readonly EVENT_TEMPO = 3;
 
   private wavetable = new Float32Array([0]);
   private noteFrequencies = new Float32Array(128);
@@ -138,21 +139,29 @@ class MkvdrvProcessor extends AudioWorkletProcessor {
     const eventKind = this.sequenceEvents[base];
     const note = this.sequenceEvents[base + 1];
     const lengthTicks = this.sequenceEvents[base + 2];
-    const eventSamples = Math.max(
-      1,
-      Math.round((60 / this.bpm / this.ticksPerBeat) * sampleRate * lengthTicks)
-    );
-
-    this.eventSamplesRemaining = eventSamples;
 
     if (eventKind === MkvdrvProcessor.EVENT_NOTE_ON) {
+      const eventSamples = Math.max(
+        1,
+        Math.round((60 / this.bpm / this.ticksPerBeat) * sampleRate * lengthTicks)
+      );
       this.sequenceFrequency = this.noteFrequencies[note] ?? 0;
       this.targetAmplitude = 1;
+      this.eventSamplesRemaining = eventSamples;
     } else if (eventKind === MkvdrvProcessor.EVENT_NOTE_OFF) {
+      const eventSamples = Math.max(
+        1,
+        Math.round((60 / this.bpm / this.ticksPerBeat) * sampleRate * lengthTicks)
+      );
       this.sequenceFrequency = 0;
       this.targetAmplitude = 0;
+      this.eventSamplesRemaining = eventSamples;
+    } else if (eventKind === MkvdrvProcessor.EVENT_TEMPO) {
+      this.bpm = note;
+      this.eventSamplesRemaining = 0;
     } else {
       this.targetAmplitude = 0;
+      this.eventSamplesRemaining = 0;
     }
 
     this.sequenceIndex =
@@ -196,8 +205,12 @@ class MkvdrvProcessor extends AudioWorkletProcessor {
 
     for (let index = 0; index < left.length; index += 1) {
       if (this.mode === "sequence") {
-        if (this.eventSamplesRemaining <= 0) {
+        while (this.eventSamplesRemaining <= 0) {
           this.advanceSequenceEvent();
+
+          if (this.mode !== "sequence") {
+            break;
+          }
         }
       }
 
