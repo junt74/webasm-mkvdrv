@@ -5,17 +5,19 @@ use core::str;
 
 use mml::{
     collect_parse_diagnostics_with_context, format_parse_failure_with_context,
-    parse_failure_quick_fixes, parse_mml_with_context, ParseFailure,
+    parse_failure_quick_fixes, parse_mml_with_context, EnvelopeDefinition, ParseFailure,
+    PSG_DEFAULT_VOLUME, PSG_NOISE_MODE_WHITE, SequenceEvent, EVENT_ENVELOPE_SELECT,
+    EVENT_NOISE_OFF, EVENT_NOISE_ON, EVENT_NOTE_OFF, EVENT_NOTE_ON, EVENT_TEMPO, EVENT_VOLUME,
 };
-
-#[cfg(test)]
-use mml::{EVENT_NOTE_OFF, EVENT_NOTE_ON, EVENT_TEMPO};
 
 const INIT_MESSAGE: &[u8] = b"MKVDRV-Wasm core initialized";
 const WAVETABLE_CAPACITY: usize = 2048;
 const NOTE_FREQUENCY_CAPACITY: usize = 128;
-const SEQUENCE_EVENT_STRIDE: usize = 3;
+const SEQUENCE_EVENT_STRIDE: usize = 5;
 const SEQUENCE_EVENT_CAPACITY: usize = 128;
+const ENVELOPE_DEFINITION_CAPACITY: usize = 16;
+const ENVELOPE_VALUE_CAPACITY: usize = 32;
+const ENVELOPE_HEADER_STRIDE: usize = 4;
 const SEQUENCE_TICKS_PER_BEAT: u32 = 24;
 const MML_INPUT_CAPACITY: usize = 4096;
 const A4_INDEX: i32 = 69;
@@ -25,6 +27,11 @@ static mut WAVETABLE: [f32; WAVETABLE_CAPACITY] = [0.0; WAVETABLE_CAPACITY];
 static mut NOTE_FREQUENCIES: [f32; NOTE_FREQUENCY_CAPACITY] = [0.0; NOTE_FREQUENCY_CAPACITY];
 static mut SEQUENCE_EVENTS: [u32; SEQUENCE_EVENT_CAPACITY * SEQUENCE_EVENT_STRIDE] =
     [0; SEQUENCE_EVENT_CAPACITY * SEQUENCE_EVENT_STRIDE];
+static mut ENVELOPE_DEFINITION_COUNT: usize = 0;
+static mut ENVELOPE_DEFINITION_HEADERS: [u32; ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_HEADER_STRIDE] =
+    [0; ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_HEADER_STRIDE];
+static mut ENVELOPE_DEFINITION_VALUES: [u32; ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_VALUE_CAPACITY] =
+    [0; ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_VALUE_CAPACITY];
 static mut MML_INPUT_BUFFER: [u8; MML_INPUT_CAPACITY] = [0; MML_INPUT_CAPACITY];
 const LAST_PARSE_ERROR_MESSAGE_CAPACITY: usize = 256;
 const PARSE_DIAGNOSTIC_CAPACITY: usize = 16;
@@ -70,8 +77,6 @@ static mut PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENTS: [u8;
             * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY
             * PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY];
 static mut CONDITIONAL_BRANCH_INDEX: usize = 0;
-
-const DEMO_MML: &str = "t124 o4 l16 ceg>c<g e c r dfa>b<a f d r";
 
 #[unsafe(no_mangle)]
 pub extern "C" fn mkvdrv_init_message_ptr() -> *const u8 {
@@ -135,6 +140,31 @@ pub extern "C" fn mkvdrv_sequence_event_stride() -> usize {
 #[unsafe(no_mangle)]
 pub extern "C" fn mkvdrv_sequence_ticks_per_beat() -> u32 {
     SEQUENCE_TICKS_PER_BEAT
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_envelope_definition_count() -> usize {
+    unsafe { ENVELOPE_DEFINITION_COUNT }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_envelope_definition_headers_ptr() -> *const u32 {
+    core::ptr::addr_of!(ENVELOPE_DEFINITION_HEADERS).cast::<u32>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_envelope_definition_values_ptr() -> *const u32 {
+    core::ptr::addr_of!(ENVELOPE_DEFINITION_VALUES).cast::<u32>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_envelope_definition_header_stride() -> usize {
+    ENVELOPE_HEADER_STRIDE
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_envelope_definition_value_stride() -> usize {
+    ENVELOPE_VALUE_CAPACITY
 }
 
 #[unsafe(no_mangle)]
@@ -254,6 +284,7 @@ pub extern "C" fn mkvdrv_parse_mml_from_buffer(input_len: usize) -> usize {
     let len = input_len.min(MML_INPUT_CAPACITY);
     let source = unsafe { str::from_utf8_unchecked(&MML_INPUT_BUFFER[..len]) };
     fill_sequence_events_from_mml(source).unwrap_or_else(|error| {
+        clear_envelope_definitions();
         store_parse_failures(source, &error);
         0
     })
@@ -261,22 +292,223 @@ pub extern "C" fn mkvdrv_parse_mml_from_buffer(input_len: usize) -> usize {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn mkvdrv_fill_demo_sequence() -> usize {
-    fill_sequence_events_from_mml(DEMO_MML).unwrap_or_else(|error| {
-        store_parse_failures(DEMO_MML, &error);
-        0
-    })
+    fill_demo_sequence_events()
 }
 
 fn fill_sequence_events_from_mml(source: &str) -> Result<usize, ParseFailure> {
     let branch_index = unsafe { CONDITIONAL_BRANCH_INDEX };
     let parsed = parse_mml_with_context(source, SEQUENCE_EVENT_CAPACITY, branch_index)?;
+    let playback_events = build_playback_events(&parsed.events);
+    write_envelope_definitions(&parsed.envelopes);
 
-    for (index, event) in parsed.events.iter().enumerate() {
-        write_event(index, event.kind, event.value, event.length_ticks);
+    for (index, event) in playback_events.iter().enumerate() {
+        write_event(
+            index,
+            event.kind,
+            event.value,
+            event.length_ticks,
+            event.channel,
+            event.param,
+        );
     }
 
     clear_parse_failure();
-    Ok(parsed.events.len())
+    Ok(playback_events.len())
+}
+
+fn fill_demo_sequence_events() -> usize {
+    clear_envelope_definitions();
+    let demo_events = [
+        SequenceEvent {
+            kind: EVENT_TEMPO,
+            value: 132,
+            length_ticks: 0,
+            channel: 0,
+            param: 0,
+        },
+        SequenceEvent {
+            kind: EVENT_VOLUME,
+            value: 12,
+            length_ticks: 0,
+            channel: 0,
+            param: 0,
+        },
+        SequenceEvent {
+            kind: EVENT_VOLUME,
+            value: 10,
+            length_ticks: 0,
+            channel: 1,
+            param: 0,
+        },
+        SequenceEvent {
+            kind: EVENT_VOLUME,
+            value: 9,
+            length_ticks: 0,
+            channel: 2,
+            param: 0,
+        },
+        SequenceEvent {
+            kind: EVENT_NOTE_ON,
+            value: 36,
+            length_ticks: 12,
+            channel: 0,
+            param: PSG_DEFAULT_VOLUME,
+        },
+        SequenceEvent {
+            kind: EVENT_NOTE_ON,
+            value: 40,
+            length_ticks: 12,
+            channel: 1,
+            param: 10,
+        },
+        SequenceEvent {
+            kind: EVENT_NOTE_ON,
+            value: 43,
+            length_ticks: 12,
+            channel: 2,
+            param: 9,
+        },
+        SequenceEvent {
+            kind: EVENT_NOISE_ON,
+            value: 2400,
+            length_ticks: 6,
+            channel: 3,
+            param: encode_noise_param(8, PSG_NOISE_MODE_WHITE),
+        },
+        SequenceEvent {
+            kind: EVENT_NOISE_OFF,
+            value: 0,
+            length_ticks: 6,
+            channel: 3,
+            param: 0,
+        },
+        SequenceEvent {
+            kind: EVENT_NOTE_OFF,
+            value: 36,
+            length_ticks: 6,
+            channel: 0,
+            param: 0,
+        },
+        SequenceEvent {
+            kind: EVENT_NOTE_OFF,
+            value: 40,
+            length_ticks: 6,
+            channel: 1,
+            param: 0,
+        },
+        SequenceEvent {
+            kind: EVENT_NOTE_OFF,
+            value: 43,
+            length_ticks: 6,
+            channel: 2,
+            param: 0,
+        },
+    ];
+
+    let playback_events = build_playback_events(&demo_events);
+
+    for (index, event) in playback_events.iter().enumerate() {
+        write_event(
+            index,
+            event.kind,
+            event.value,
+            event.length_ticks,
+            event.channel,
+            event.param,
+        );
+    }
+
+    clear_parse_failure();
+    playback_events.len()
+}
+
+fn encode_noise_param(volume: u32, noise_mode: u32) -> u32 {
+    (noise_mode << 8) | volume.min(15)
+}
+
+fn write_envelope_definitions(definitions: &[EnvelopeDefinition]) {
+    clear_envelope_definitions();
+    let count = definitions.len().min(ENVELOPE_DEFINITION_CAPACITY);
+
+    unsafe {
+        ENVELOPE_DEFINITION_COUNT = count;
+    }
+
+    for (index, definition) in definitions.iter().take(count).enumerate() {
+        let header_base = index * ENVELOPE_HEADER_STRIDE;
+        let value_base = index * ENVELOPE_VALUE_CAPACITY;
+        let value_len = definition.values.len().min(ENVELOPE_VALUE_CAPACITY);
+
+        unsafe {
+            ENVELOPE_DEFINITION_HEADERS[header_base] = definition.id;
+            ENVELOPE_DEFINITION_HEADERS[header_base + 1] = definition.speed;
+            ENVELOPE_DEFINITION_HEADERS[header_base + 2] = value_len as u32;
+            ENVELOPE_DEFINITION_HEADERS[header_base + 3] =
+                definition.loop_start.unwrap_or(u32::MAX);
+        }
+
+        for (offset, value) in definition.values.iter().take(value_len).enumerate() {
+            unsafe {
+                ENVELOPE_DEFINITION_VALUES[value_base + offset] = *value;
+            }
+        }
+    }
+}
+
+fn clear_envelope_definitions() {
+    unsafe {
+        ENVELOPE_DEFINITION_COUNT = 0;
+    }
+
+    for slot in 0..(ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_HEADER_STRIDE) {
+        unsafe {
+            ENVELOPE_DEFINITION_HEADERS[slot] = 0;
+        }
+    }
+
+    for slot in 0..(ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_VALUE_CAPACITY) {
+        unsafe {
+            ENVELOPE_DEFINITION_VALUES[slot] = 0;
+        }
+    }
+}
+
+fn build_playback_events(events: &[SequenceEvent]) -> Vec<SequenceEvent> {
+    let mut channel_times = [0_u32; 4];
+    let mut merged: Vec<(u32, u32, usize, SequenceEvent)> = Vec::with_capacity(events.len());
+
+    for (original_index, event) in events.iter().copied().enumerate() {
+        let channel_index = event.channel.min((channel_times.len() - 1) as u32) as usize;
+        let absolute_tick = channel_times[channel_index];
+        let priority = event_priority(event.kind);
+        merged.push((absolute_tick, priority, original_index, event));
+        channel_times[channel_index] = channel_times[channel_index].saturating_add(event.length_ticks);
+    }
+
+    merged.sort_by_key(|(absolute_tick, priority, original_index, _)| {
+        (*absolute_tick, *priority, *original_index)
+    });
+
+    let mut previous_tick = 0_u32;
+    merged
+        .into_iter()
+        .map(|(absolute_tick, _, _, mut event)| {
+            event.length_ticks = absolute_tick.saturating_sub(previous_tick);
+            previous_tick = absolute_tick;
+            event
+        })
+        .collect()
+}
+
+fn event_priority(kind: u32) -> u32 {
+    match kind {
+        EVENT_TEMPO => 0,
+        EVENT_VOLUME => 1,
+        EVENT_ENVELOPE_SELECT => 2,
+        EVENT_NOTE_OFF | EVENT_NOISE_OFF => 3,
+        EVENT_NOTE_ON | EVENT_NOISE_ON => 4,
+        _ => 4,
+    }
 }
 
 fn clear_parse_failure() {
@@ -425,13 +657,22 @@ fn store_parse_diagnostics(source: &str, diagnostics: &[ParseFailure], branch_in
     }
 }
 
-fn write_event(index: usize, event_kind: u32, value: u32, length_ticks: u32) {
+fn write_event(
+    index: usize,
+    event_kind: u32,
+    value: u32,
+    length_ticks: u32,
+    channel: u32,
+    param: u32,
+) {
     let base = index * SEQUENCE_EVENT_STRIDE;
 
     unsafe {
         SEQUENCE_EVENTS[base] = event_kind;
         SEQUENCE_EVENTS[base + 1] = value;
         SEQUENCE_EVENTS[base + 2] = length_ticks;
+        SEQUENCE_EVENTS[base + 3] = channel;
+        SEQUENCE_EVENTS[base + 4] = param;
     }
 }
 
@@ -488,24 +729,25 @@ mod tests {
         let _guard = lock_test_state();
         let event_count = mkvdrv_fill_demo_sequence();
 
-        assert!(event_count >= 3);
+        assert!(event_count >= 8);
         assert_eq!(unsafe { SEQUENCE_EVENTS[0] }, EVENT_TEMPO);
-        assert_eq!(unsafe { SEQUENCE_EVENTS[1] }, 124);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[1] }, 132);
 
         let first_note_base = SEQUENCE_EVENT_STRIDE;
-        assert_eq!(unsafe { SEQUENCE_EVENTS[first_note_base] }, EVENT_NOTE_ON);
-        assert_eq!(unsafe { SEQUENCE_EVENTS[first_note_base + 1] }, 36);
-        assert_eq!(unsafe { SEQUENCE_EVENTS[first_note_base + 2] }, 6);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[first_note_base] }, EVENT_VOLUME);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[first_note_base + 1] }, 12);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[first_note_base + 3] }, 0);
 
-        let first_note_off_base = SEQUENCE_EVENT_STRIDE * 2;
-        assert_eq!(unsafe { SEQUENCE_EVENTS[first_note_off_base] }, EVENT_NOTE_OFF);
-        assert_eq!(unsafe { SEQUENCE_EVENTS[first_note_off_base + 1] }, 36);
+        let noise_base = SEQUENCE_EVENT_STRIDE * 7;
+        assert_eq!(unsafe { SEQUENCE_EVENTS[noise_base] }, EVENT_NOISE_ON);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[noise_base + 1] }, 2400);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[noise_base + 3] }, 3);
     }
 
     #[test]
     fn parses_mml_from_buffer() {
         let _guard = lock_test_state();
-        let input = b"t150 o4 l8 c r d";
+        let input = b"@E1={1,0,4,8}\nA @E1 t150 o4 l8 c r d";
 
         unsafe {
             MML_INPUT_BUFFER[..input.len()].copy_from_slice(input);
@@ -513,11 +755,22 @@ mod tests {
 
         let event_count = mkvdrv_parse_mml_from_buffer(input.len());
 
-        assert_eq!(event_count, 6);
+        assert_eq!(event_count, 7);
         assert_eq!(unsafe { SEQUENCE_EVENTS[0] }, EVENT_TEMPO);
         assert_eq!(unsafe { SEQUENCE_EVENTS[1] }, 150);
-        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE] }, EVENT_NOTE_ON);
-        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE + 1] }, 36);
+        assert_eq!(unsafe { ENVELOPE_DEFINITION_COUNT }, 1);
+        assert_eq!(unsafe { ENVELOPE_DEFINITION_HEADERS[0] }, 1);
+        assert_eq!(unsafe { ENVELOPE_DEFINITION_HEADERS[1] }, 1);
+        assert_eq!(unsafe { ENVELOPE_DEFINITION_VALUES[0] }, 0);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE] }, EVENT_ENVELOPE_SELECT);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE + 1] }, 1);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2] }, EVENT_NOTE_ON);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2 + 1] }, 36);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2 + 3] }, 0);
+        assert_eq!(
+            unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2 + 4] },
+            PSG_DEFAULT_VOLUME
+        );
     }
 
     #[test]

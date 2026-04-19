@@ -36,11 +36,21 @@ app.innerHTML = `
         <input id="branch-index" type="number" min="0" max="31" step="1" value="0" />
         <strong id="branch-index-value">branch 0</strong>
       </label>
+      <label class="control control-compact">
+        <span>Sound Engine</span>
+        <select id="render-engine" class="sample-select">
+          <option value="an74689">AN74689 PSG</option>
+          <option value="sine">Sine Test</option>
+        </select>
+      </label>
       <label class="control">
         <span>MML Sample</span>
         <select id="mml-sample" class="sample-select">
           <option value="arp">Arpeggio Demo</option>
           <option value="scale">Scale Walk</option>
+          <option value="channels">Channel Split</option>
+          <option value="noise">Noise Mode</option>
+          <option value="envelope">Envelope Shape</option>
           <option value="articulation">Articulation Check</option>
           <option value="branch">Branch Selection</option>
           <option value="error">Error Example</option>
@@ -116,6 +126,11 @@ type MkvdrvWasmExports = {
   mkvdrv_sequence_events_ptr: () => number;
   mkvdrv_sequence_event_stride: () => number;
   mkvdrv_sequence_ticks_per_beat: () => number;
+  mkvdrv_envelope_definition_count: () => number;
+  mkvdrv_envelope_definition_headers_ptr: () => number;
+  mkvdrv_envelope_definition_values_ptr: () => number;
+  mkvdrv_envelope_definition_header_stride: () => number;
+  mkvdrv_envelope_definition_value_stride: () => number;
   mkvdrv_fill_demo_sequence: () => number;
   mkvdrv_mml_input_buffer_ptr: () => number;
   mkvdrv_mml_input_buffer_capacity: () => number;
@@ -142,6 +157,15 @@ type MkvdrvWasmExports = {
   mkvdrv_parse_mml_from_buffer: (inputLength: number) => number;
 };
 
+type RenderEngine = "sine" | "an74689";
+
+type SequenceEnvelope = {
+  id: number;
+  speed: number;
+  values: number[];
+  loopStart?: number;
+};
+
 type WasmRuntime = {
   exports: MkvdrvWasmExports;
   message: string;
@@ -150,6 +174,7 @@ type WasmRuntime = {
   sequenceEvents: Uint32Array;
   sequenceEventStride: number;
   sequenceTicksPerBeat: number;
+  envelopes: SequenceEnvelope[];
 };
 
 let runtimePromise: Promise<WasmRuntime> | undefined;
@@ -193,6 +218,22 @@ const MML_SAMPLES = {
     source: "t132 o4 l8 cdefgab>c<bagfedc",
     branchIndex: 0
   },
+  channels: {
+    label: "Channel Split",
+    source: "A t132 o4 l8 c>c<g e\nB o3 l8 c g c g\nC o2 l4 c r\nN l8 c r c r",
+    branchIndex: 0
+  },
+  noise: {
+    label: "Noise Mode",
+    source: "A t132 o4 l8 c e g e\nN l8 v10 w1 c r c r\nN l8 v10 w0 c r c r",
+    branchIndex: 0
+  },
+  envelope: {
+    label: "Envelope Shape",
+    source:
+      "@E1={1,0,2,4,6,8,10,12,14}\n@E2={2,0,4,8,12,255,1}\nA t132 o4 l8 @E1 v14 c e g > c\nB o3 l8 @E2 v11 c c g g\nN l8 @E2 v9 w1 c r c r",
+    branchIndex: 0
+  },
   articulation: {
     label: "Articulation Check",
     source: "t120 o4 l8 q3 c d e f Q6 g a b > c R:2 ~b:3",
@@ -224,6 +265,8 @@ const branchIndexInput =
   document.querySelector<HTMLInputElement>("#branch-index");
 const branchIndexValue =
   document.querySelector<HTMLElement>("#branch-index-value");
+const renderEngineSelect =
+  document.querySelector<HTMLSelectElement>("#render-engine");
 const sampleSelect = document.querySelector<HTMLSelectElement>("#mml-sample");
 const mmlOverlay = document.querySelector<HTMLElement>("#mml-overlay");
 const mmlEditorShell =
@@ -382,6 +425,16 @@ const loadRuntime = async (): Promise<WasmRuntime> => {
       );
       const sequenceEvents = new Uint32Array(eventSource);
       const sequenceTicksPerBeat = exports.mkvdrv_sequence_ticks_per_beat();
+      const envelopes = readEnvelopeDefinitions({
+        exports,
+        message,
+        wavetable,
+        noteFrequencies,
+        sequenceEvents,
+        sequenceEventStride: eventStride,
+        sequenceTicksPerBeat,
+        envelopes: []
+      });
 
       return {
         exports,
@@ -390,7 +443,8 @@ const loadRuntime = async (): Promise<WasmRuntime> => {
         noteFrequencies,
         sequenceEvents,
         sequenceEventStride: eventStride,
-        sequenceTicksPerBeat
+        sequenceTicksPerBeat,
+        envelopes
       };
     })();
   }
@@ -425,6 +479,9 @@ const currentBranchIndex = (): number => {
 
   return rawValue;
 };
+
+const currentRenderEngine = (): RenderEngine =>
+  (renderEngineSelect?.value as RenderEngine | undefined) ?? "an74689";
 
 const updateBranchLabel = () => {
   if (branchIndexValue) {
@@ -1006,7 +1063,42 @@ const readSequenceEvents = (
   return new Uint32Array(eventSource);
 };
 
-const parseMmlText = (runtime: WasmRuntime, source: string): Uint32Array => {
+const readEnvelopeDefinitions = (runtime: WasmRuntime): SequenceEnvelope[] => {
+  const count = runtime.exports.mkvdrv_envelope_definition_count();
+  const headerStride = runtime.exports.mkvdrv_envelope_definition_header_stride();
+  const valueStride = runtime.exports.mkvdrv_envelope_definition_value_stride();
+  const headerPointer = runtime.exports.mkvdrv_envelope_definition_headers_ptr();
+  const valuePointer = runtime.exports.mkvdrv_envelope_definition_values_ptr();
+  const headerSource = new Uint32Array(
+    runtime.exports.memory.buffer,
+    headerPointer,
+    count * headerStride
+  );
+  const valueSource = new Uint32Array(
+    runtime.exports.memory.buffer,
+    valuePointer,
+    count * valueStride
+  );
+
+  return Array.from({ length: count }, (_, index) => {
+    const headerBase = index * headerStride;
+    const valueBase = index * valueStride;
+    const valueCount = headerSource[headerBase + 2] ?? 0;
+    const loopStart = headerSource[headerBase + 3];
+
+    return {
+      id: headerSource[headerBase] ?? 0,
+      speed: headerSource[headerBase + 1] ?? 1,
+      values: Array.from(valueSource.slice(valueBase, valueBase + valueCount)),
+      loopStart: loopStart === 0xffffffff ? undefined : loopStart
+    };
+  });
+};
+
+const parseMmlText = (
+  runtime: WasmRuntime,
+  source: string
+): { sequenceEvents: Uint32Array; envelopes: SequenceEnvelope[] } => {
   const encoder = new TextEncoder();
   const encoded = encoder.encode(source);
   const capacity = runtime.exports.mkvdrv_mml_input_buffer_capacity();
@@ -1060,7 +1152,10 @@ const parseMmlText = (runtime: WasmRuntime, source: string): Uint32Array => {
     );
   }
 
-  return readSequenceEvents(runtime, eventCount);
+  return {
+    sequenceEvents: readSequenceEvents(runtime, eventCount),
+    envelopes: readEnvelopeDefinitions(runtime)
+  };
 };
 
 const configureNode = (
@@ -1069,6 +1164,7 @@ const configureNode = (
 ) => {
   node.port.postMessage({
     type: "configure",
+    renderEngine: currentRenderEngine(),
     wavetable: runtime.wavetable,
     frequency: currentFrequency(),
     noteFrequencies: runtime.noteFrequencies
@@ -1089,7 +1185,7 @@ const boot = async () => {
       updateBranchLabel();
     }
     updateLog(
-      `${runtime.message}\nWavetable length: ${runtime.wavetable.length} samples\nNote table: ${runtime.noteFrequencies.length} entries\nDemo sequence events: ${runtime.sequenceEvents.length / runtime.sequenceEventStride}`
+      `${runtime.message}\nSound engine: ${currentRenderEngine()}\nWavetable length: ${runtime.wavetable.length} samples\nNote table: ${runtime.noteFrequencies.length} entries\nDemo sequence events: ${runtime.sequenceEvents.length / runtime.sequenceEventStride}\nEnvelope defs: ${runtime.envelopes.length}`
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -1108,7 +1204,7 @@ startButton?.addEventListener("click", async () => {
     node.port.postMessage({ type: "startTone" });
 
     updateLog(
-      `${runtime.message}\nTone playback started at ${currentFrequency().toFixed(0)} Hz`
+      `${runtime.message}\nSound engine: ${currentRenderEngine()}\nTone playback started at ${currentFrequency().toFixed(0)} Hz`
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -1129,11 +1225,12 @@ sequenceButton?.addEventListener("click", async () => {
       bpm: currentTempo(),
       ticksPerBeat: runtime.sequenceTicksPerBeat,
       sequenceEvents: runtime.sequenceEvents,
-      eventStride: runtime.sequenceEventStride
+      eventStride: runtime.sequenceEventStride,
+      envelopes: runtime.envelopes
     });
 
     updateLog(
-      `${runtime.message}\nRust demo sequence started at ${currentTempo().toFixed(0)} BPM`
+      `${runtime.message}\nSound engine: ${currentRenderEngine()}\nRust demo sequence started at ${currentTempo().toFixed(0)} BPM`
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -1150,18 +1247,19 @@ mmlButton?.addEventListener("click", async () => {
 
     configureNode(node, runtime);
     const source = mmlInput?.value ?? "";
-    const sequenceEvents = parseMmlText(runtime, source);
+    const { sequenceEvents, envelopes } = parseMmlText(runtime, source);
 
     node.port.postMessage({
       type: "startSequence",
       bpm: currentTempo(),
       ticksPerBeat: runtime.sequenceTicksPerBeat,
       sequenceEvents,
-      eventStride: runtime.sequenceEventStride
+      eventStride: runtime.sequenceEventStride,
+      envelopes
     });
 
     updateLog(
-      `${runtime.message}\nParsed MML events: ${sequenceEvents.length / runtime.sequenceEventStride}\nPlayback started from MML input.`
+      `${runtime.message}\nSound engine: ${currentRenderEngine()}\nParsed MML events: ${sequenceEvents.length / runtime.sequenceEventStride}\nEnvelope defs: ${envelopes.length}\nPlayback started from MML input.`
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -1200,6 +1298,20 @@ tempoInput?.addEventListener("input", () => {
 
 branchIndexInput?.addEventListener("input", () => {
   updateBranchLabel();
+});
+
+renderEngineSelect?.addEventListener("change", async () => {
+  try {
+    const runtime = await loadRuntime();
+    const node = await ensureAudioNode();
+    configureNode(node, runtime);
+    updateLog(
+      `${runtime.message}\nSound engine switched to ${currentRenderEngine()}.`
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    updateLog(`Failed to switch sound engine.\n${reason}`);
+  }
 });
 
 mmlQuickFixApply?.addEventListener("click", () => {

@@ -7,22 +7,44 @@ const DEFAULT_TEMPO_BPM: u32 = 120;
 const MML_OCTAVE_OFFSET: i32 = -1;
 const DEFAULT_QUANTIZE_NUMERATOR: u32 = 8;
 const DEFAULT_QUANTIZE_DENOMINATOR: u32 = 8;
+const PSG_CHANNEL_COUNT: usize = 4;
+const PSG_NOISE_CHANNEL: u32 = 3;
 
 pub const EVENT_NOTE_ON: u32 = 1;
 pub const EVENT_NOTE_OFF: u32 = 2;
 pub const EVENT_TEMPO: u32 = 3;
+pub const EVENT_VOLUME: u32 = 4;
+pub const EVENT_NOISE_ON: u32 = 5;
+pub const EVENT_NOISE_OFF: u32 = 6;
+pub const EVENT_ENVELOPE_SELECT: u32 = 7;
+pub const PSG_DEFAULT_CHANNEL: u32 = 0;
+pub const PSG_DEFAULT_VOLUME: u32 = 12;
+#[allow(dead_code)]
+pub const PSG_NOISE_MODE_PERIODIC: u32 = 0;
+pub const PSG_NOISE_MODE_WHITE: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SequenceEvent {
     pub kind: u32,
     pub value: u32,
     pub length_ticks: u32,
+    pub channel: u32,
+    pub param: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedSequence {
     pub ticks_per_beat: u32,
     pub events: Vec<SequenceEvent>,
+    pub envelopes: Vec<EnvelopeDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvelopeDefinition {
+    pub id: u32,
+    pub speed: u32,
+    pub values: Vec<u32>,
+    pub loop_start: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +55,9 @@ pub enum ParseError {
     InvalidTempo,
     InvalidOctave,
     InvalidQuantize,
+    InvalidNoiseMode,
+    InvalidEnvelopeDefinition,
+    InvalidEnvelopeSelection,
     InvalidTie,
     InvalidSlur,
     InvalidReverseRest,
@@ -55,6 +80,9 @@ impl fmt::Display for ParseError {
             Self::InvalidTempo => write!(f, "invalid tempo"),
             Self::InvalidOctave => write!(f, "invalid octave"),
             Self::InvalidQuantize => write!(f, "invalid quantize"),
+            Self::InvalidNoiseMode => write!(f, "invalid noise mode"),
+            Self::InvalidEnvelopeDefinition => write!(f, "invalid envelope definition"),
+            Self::InvalidEnvelopeSelection => write!(f, "invalid envelope selection"),
             Self::InvalidTie => write!(f, "invalid '^' target"),
             Self::InvalidSlur => write!(f, "invalid '&' target"),
             Self::InvalidReverseRest => write!(f, "invalid reverse-rest target"),
@@ -76,6 +104,35 @@ pub struct ParseFailure {
 pub struct QuickFixSuggestion {
     pub label: String,
     pub replacement: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TrackState {
+    ticks_per_whole: u32,
+    default_length: u32,
+    octave: i32,
+    quantize_numerator: u32,
+    quantize_denominator: u32,
+    early_release_ticks: u32,
+    volume: u32,
+    noise_mode: u32,
+    envelope_id: u32,
+}
+
+impl Default for TrackState {
+    fn default() -> Self {
+        Self {
+            ticks_per_whole: DEFAULT_TICKS_PER_WHOLE,
+            default_length: DEFAULT_NOTE_LENGTH,
+            octave: 4 + MML_OCTAVE_OFFSET,
+            quantize_numerator: DEFAULT_QUANTIZE_NUMERATOR,
+            quantize_denominator: DEFAULT_QUANTIZE_DENOMINATOR,
+            early_release_ticks: 0,
+            volume: PSG_DEFAULT_VOLUME,
+            noise_mode: PSG_NOISE_MODE_WHITE,
+            envelope_id: 0,
+        }
+    }
 }
 
 impl ParseFailure {
@@ -161,6 +218,7 @@ pub fn parse_mml_with_context(
     Ok(ParsedSequence {
         ticks_per_beat: parser.ticks_per_beat,
         events: parser.events,
+        envelopes: parser.envelope_definitions,
     })
 }
 
@@ -198,7 +256,7 @@ fn unsupported_command_hint(error: &ParseError) -> Option<String> {
         return None;
     }
 
-    if "cdefgabrtloCQqR".contains(*character) {
+    if "cdefgabrtlovwCQqR".contains(*character) {
         return None;
     }
 
@@ -519,14 +577,11 @@ fn attach_context_related_position(source: &str, mut failure: ParseFailure) -> P
 struct Parser {
     max_events: usize,
     ticks_per_beat: u32,
-    ticks_per_whole: u32,
-    default_length: u32,
-    octave: i32,
     tempo_bpm: u32,
-    quantize_numerator: u32,
-    quantize_denominator: u32,
-    early_release_ticks: u32,
     conditional_branch_index: usize,
+    active_channels: Vec<u32>,
+    track_states: [TrackState; PSG_CHANNEL_COUNT],
+    envelope_definitions: Vec<EnvelopeDefinition>,
     events: Vec<SequenceEvent>,
 }
 
@@ -535,29 +590,54 @@ impl Parser {
         Self {
             max_events,
             ticks_per_beat: DEFAULT_TICKS_PER_BEAT,
-            ticks_per_whole: DEFAULT_TICKS_PER_WHOLE,
-            default_length: DEFAULT_NOTE_LENGTH,
-            octave: 4 + MML_OCTAVE_OFFSET,
             tempo_bpm: DEFAULT_TEMPO_BPM,
-            quantize_numerator: DEFAULT_QUANTIZE_NUMERATOR,
-            quantize_denominator: DEFAULT_QUANTIZE_DENOMINATOR,
-            early_release_ticks: 0,
             conditional_branch_index,
+            active_channels: vec![PSG_DEFAULT_CHANNEL],
+            track_states: [TrackState::default(); PSG_CHANNEL_COUNT],
+            envelope_definitions: Vec::new(),
             events: Vec::new(),
         }
     }
 
     fn parse_bytes(&mut self, bytes: &[u8], base_offset: usize) -> Result<(), ParseFailure> {
         let mut index = 0;
+        let mut at_line_start = true;
 
         while let Some(byte) = peek(bytes, index) {
             let position = base_offset + index;
 
+            if at_line_start {
+                if matches!(byte, b' ' | b'\t' | b'\r') {
+                    index += 1;
+                    continue;
+                }
+
+                if let Some((channels, next_index)) = parse_track_selector(bytes, index) {
+                    self.active_channels = channels;
+                    index = next_index;
+                    at_line_start = false;
+                    continue;
+                }
+            }
+
+            at_line_start = false;
+
             match byte {
-                b' ' | b'\t' | b'\n' | b'\r' | b'|' => {
+                b' ' | b'\t' | b'\r' | b'|' => {
                     index += 1;
                 }
-                b';' => skip_comment(bytes, &mut index),
+                b'\n' => {
+                    index += 1;
+                    at_line_start = true;
+                }
+                b';' => {
+                    skip_comment(bytes, &mut index);
+                }
+                b'@' => {
+                    index += 1;
+                    self.parse_at_command(bytes, &mut index)
+                        .map_err(|error| ParseFailure::at(position, error))?;
+                }
                 b't' => {
                     index += 1;
                     let tempo = read_required_number(bytes, &mut index, 't')
@@ -566,13 +646,16 @@ impl Parser {
                         return Err(ParseFailure::at(position, ParseError::InvalidTempo));
                     }
                     self.tempo_bpm = tempo;
-                    self.push_event(EVENT_TEMPO, tempo, 0)?;
+                    self.push_event_with_meta(EVENT_TEMPO, tempo, 0, PSG_DEFAULT_CHANNEL, 0)?;
                 }
                 b'l' => {
                     index += 1;
-                    self.default_length = self
+                    let duration = self
                         .read_duration(bytes, &mut index)
                         .map_err(|error| ParseFailure::at(position, error))?;
+                    self.for_each_active_track_state_mut(|state| {
+                        state.default_length = duration;
+                    });
                 }
                 b'C' => {
                     index += 1;
@@ -582,7 +665,9 @@ impl Parser {
                     if ticks == 0 {
                         return Err(ParseFailure::at(position, ParseError::InvalidLength));
                     }
-                    self.ticks_per_whole = ticks;
+                    self.for_each_active_track_state_mut(|state| {
+                        state.ticks_per_whole = ticks;
+                    });
                 }
                 b'o' => {
                     index += 1;
@@ -593,15 +678,56 @@ impl Parser {
                     if !(0..=8).contains(&octave) {
                         return Err(ParseFailure::at(position, ParseError::InvalidOctave));
                     }
-                    self.octave = octave;
+                    self.for_each_active_track_state_mut(|state| {
+                        state.octave = octave;
+                    });
                 }
                 b'>' => {
                     index += 1;
-                    self.octave += 1;
+                    self.for_each_active_track_state_mut(|state| {
+                        state.octave += 1;
+                    });
                 }
                 b'<' => {
                     index += 1;
-                    self.octave -= 1;
+                    self.for_each_active_track_state_mut(|state| {
+                        state.octave -= 1;
+                    });
+                }
+                b'v' => {
+                    index += 1;
+                    let volume = read_required_number(bytes, &mut index, 'v')
+                        .map_err(|error| ParseFailure::at(position, error))?
+                        .min(15);
+                    for channel in self.active_channels.clone() {
+                        self.track_state_mut(channel).volume = volume;
+                        let param = if channel == PSG_NOISE_CHANNEL {
+                            self.track_state(channel).noise_mode
+                        } else {
+                            0
+                        };
+                        self.push_event_with_meta(EVENT_VOLUME, volume, 0, channel, param)?;
+                    }
+                }
+                b'w' => {
+                    index += 1;
+                    let noise_mode = read_required_number(bytes, &mut index, 'w')
+                        .map_err(|error| ParseFailure::at(position, error))?;
+                    if noise_mode > PSG_NOISE_MODE_WHITE {
+                        return Err(ParseFailure::at(position, ParseError::InvalidNoiseMode));
+                    }
+                    for channel in self.active_channels.clone() {
+                        self.track_state_mut(channel).noise_mode = noise_mode;
+                        if channel == PSG_NOISE_CHANNEL {
+                            self.push_event_with_meta(
+                                EVENT_VOLUME,
+                                self.track_state(channel).volume,
+                                0,
+                                channel,
+                                noise_mode,
+                            )?;
+                        }
+                    }
                 }
                 b'Q' => {
                     index += 1;
@@ -614,54 +740,100 @@ impl Parser {
                     if quantize > DEFAULT_QUANTIZE_DENOMINATOR {
                         return Err(ParseFailure::at(position, ParseError::InvalidQuantize));
                     }
-                    self.quantize_numerator = quantize;
-                    self.quantize_denominator = DEFAULT_QUANTIZE_DENOMINATOR;
-                    self.early_release_ticks = 0;
+                    self.for_each_active_track_state_mut(|state| {
+                        state.quantize_numerator = quantize;
+                        state.quantize_denominator = DEFAULT_QUANTIZE_DENOMINATOR;
+                        state.early_release_ticks = 0;
+                    });
                 }
                 b'q' => {
                     index += 1;
                     let early_release = self
                         .read_tick_parameter(bytes, &mut index, 'q')
                         .map_err(|error| ParseFailure::at(position, error))?;
-                    self.quantize_numerator = DEFAULT_QUANTIZE_DENOMINATOR;
-                    self.quantize_denominator = DEFAULT_QUANTIZE_DENOMINATOR;
-                    self.early_release_ticks = early_release;
+                    self.for_each_active_track_state_mut(|state| {
+                        state.quantize_numerator = DEFAULT_QUANTIZE_DENOMINATOR;
+                        state.quantize_denominator = DEFAULT_QUANTIZE_DENOMINATOR;
+                        state.early_release_ticks = early_release;
+                    });
                 }
                 b'c' | b'd' | b'e' | b'f' | b'g' | b'a' | b'b' => {
-                    let note = self.read_note_number(byte);
+                    let channels = self.active_channels.clone();
                     index += 1;
                     let duration = self
                         .read_duration(bytes, &mut index)
                         .map_err(|error| ParseFailure::at(position, error))?;
-                    let (on_ticks, off_ticks) = self.articulate_duration(duration);
-                    self.push_event(EVENT_NOTE_ON, note, on_ticks)?;
-                    self.push_event(EVENT_NOTE_OFF, note, off_ticks)?;
+
+                    for channel in channels {
+                        let note = self.read_note_number(byte, channel);
+                        let (on_ticks, off_ticks) = self.articulate_duration(duration, channel);
+                        if channel == PSG_NOISE_CHANNEL {
+                            let noise_frequency = noise_frequency_from_note_number(note);
+                            self.push_event_with_meta(
+                                EVENT_NOISE_ON,
+                                noise_frequency,
+                                on_ticks,
+                                channel,
+                                encode_noise_param(
+                                    self.track_state(channel).volume,
+                                    self.track_state(channel).noise_mode,
+                                ),
+                            )?;
+                            self.push_event_with_meta(
+                                EVENT_NOISE_OFF,
+                                noise_frequency,
+                                off_ticks,
+                                channel,
+                                0,
+                            )?;
+                        } else {
+                            self.push_event_with_meta(
+                                EVENT_NOTE_ON,
+                                note,
+                                on_ticks,
+                                channel,
+                                self.track_state(channel).volume,
+                            )?;
+                            self.push_event_with_meta(EVENT_NOTE_OFF, note, off_ticks, channel, 0)?;
+                        }
+                    }
                 }
                 b'r' => {
+                    let channels = self.active_channels.clone();
                     index += 1;
                     let duration = self
                         .read_duration(bytes, &mut index)
                         .map_err(|error| ParseFailure::at(position, error))?;
-                    self.push_event(EVENT_NOTE_OFF, 0, duration)?;
+                    for channel in channels {
+                        let kind = if channel == PSG_NOISE_CHANNEL {
+                            EVENT_NOISE_OFF
+                        } else {
+                            EVENT_NOTE_OFF
+                        };
+                        self.push_event_with_meta(kind, 0, duration, channel, 0)?;
+                    }
                 }
                 b'R' => {
+                    let channels = self.active_channels.clone();
                     index += 1;
                     let duration = self
                         .read_duration(bytes, &mut index)
                         .map_err(|error| ParseFailure::at(position, error))?;
-                    self.reverse_previous_timed_event(duration, position)?;
+                    for channel in channels {
+                        self.reverse_previous_timed_event(duration, position, channel)?;
+                    }
                 }
                 b'~' => {
+                    let channels = self.active_channels.clone();
                     index += 1;
                     let note_token = peek(bytes, index).ok_or(ParseFailure::at(
                         position,
                         ParseError::UnexpectedCharacter('\0'),
                     ))?;
-                    let note = match note_token {
+                    let note_byte = match note_token {
                         b'c' | b'd' | b'e' | b'f' | b'g' | b'a' | b'b' => {
-                            let value = self.read_note_number(note_token);
                             index += 1;
-                            value
+                            note_token
                         }
                         other => {
                             return Err(ParseFailure::at(
@@ -673,21 +845,57 @@ impl Parser {
                     let duration = self
                         .read_duration(bytes, &mut index)
                         .map_err(|error| ParseFailure::at(position, error))?;
-                    self.reverse_previous_timed_event(duration, position)?;
-                    let (on_ticks, off_ticks) = self.articulate_duration(duration);
-                    self.push_event(EVENT_NOTE_ON, note, on_ticks)?;
-                    self.push_event(EVENT_NOTE_OFF, note, off_ticks)?;
+                    for channel in channels {
+                        let note = self.read_note_number(note_byte, channel);
+                        self.reverse_previous_timed_event(duration, position, channel)?;
+                        let (on_ticks, off_ticks) = self.articulate_duration(duration, channel);
+                        if channel == PSG_NOISE_CHANNEL {
+                            let noise_frequency = noise_frequency_from_note_number(note);
+                            self.push_event_with_meta(
+                                EVENT_NOISE_ON,
+                                noise_frequency,
+                                on_ticks,
+                                channel,
+                                encode_noise_param(
+                                    self.track_state(channel).volume,
+                                    self.track_state(channel).noise_mode,
+                                ),
+                            )?;
+                            self.push_event_with_meta(
+                                EVENT_NOISE_OFF,
+                                noise_frequency,
+                                off_ticks,
+                                channel,
+                                0,
+                            )?;
+                        } else {
+                            self.push_event_with_meta(
+                                EVENT_NOTE_ON,
+                                note,
+                                on_ticks,
+                                channel,
+                                self.track_state(channel).volume,
+                            )?;
+                            self.push_event_with_meta(EVENT_NOTE_OFF, note, off_ticks, channel, 0)?;
+                        }
+                    }
                 }
                 b'^' => {
+                    let channels = self.active_channels.clone();
                     index += 1;
                     let duration = self
                         .read_duration(bytes, &mut index)
                         .map_err(|error| ParseFailure::at(position, error))?;
-                    self.extend_previous_timed_event(duration, position)?;
+                    for channel in channels {
+                        self.extend_previous_timed_event(duration, position, channel)?;
+                    }
                 }
                 b'&' => {
+                    let channels = self.active_channels.clone();
                     index += 1;
-                    self.slur_previous_note(position)?;
+                    for channel in channels {
+                        self.slur_previous_note(position, channel)?;
+                    }
                 }
                 b'[' => {
                     index += 1;
@@ -727,16 +935,166 @@ impl Parser {
                     ));
                 }
             }
+
         }
 
         Ok(())
     }
 
+    fn primary_channel(&self) -> u32 {
+        self.active_channels
+            .first()
+            .copied()
+            .unwrap_or(PSG_DEFAULT_CHANNEL)
+    }
+
+    fn track_state(&self, channel: u32) -> &TrackState {
+        &self.track_states[channel.min((PSG_CHANNEL_COUNT - 1) as u32) as usize]
+    }
+
+    fn track_state_mut(&mut self, channel: u32) -> &mut TrackState {
+        &mut self.track_states[channel.min((PSG_CHANNEL_COUNT - 1) as u32) as usize]
+    }
+
+    fn for_each_active_track_state_mut(&mut self, mut update: impl FnMut(&mut TrackState)) {
+        let channels = self.active_channels.clone();
+        for channel in channels {
+            update(self.track_state_mut(channel));
+        }
+    }
+
+    fn parse_at_command(
+        &mut self,
+        bytes: &[u8],
+        index: &mut usize,
+    ) -> Result<(), ParseError> {
+        match peek(bytes, *index) {
+            Some(b'E') => {
+                *index += 1;
+                skip_spaces_inline(bytes, index);
+                let envelope_id =
+                    read_required_number(bytes, index, 'E').map_err(|_| ParseError::InvalidEnvelopeSelection)?;
+                skip_spaces_inline(bytes, index);
+
+                if matches!(peek(bytes, *index), Some(b'=')) {
+                    *index += 1;
+                    let definition = self.parse_envelope_definition(bytes, index, envelope_id)?;
+                    self.store_envelope_definition(definition);
+                    return Ok(());
+                }
+
+                for channel in self.active_channels.clone() {
+                    self.track_state_mut(channel).envelope_id = envelope_id;
+                    self.push_event_with_meta(
+                        EVENT_ENVELOPE_SELECT,
+                        envelope_id,
+                        0,
+                        channel,
+                        0,
+                    )
+                    .map_err(|_| ParseError::TooManyEvents)?;
+                }
+                Ok(())
+            }
+            Some(other) => Err(ParseError::UnexpectedCharacter(other as char)),
+            None => Err(ParseError::UnexpectedCharacter('\0')),
+        }
+    }
+
+    fn parse_envelope_definition(
+        &self,
+        bytes: &[u8],
+        index: &mut usize,
+        envelope_id: u32,
+    ) -> Result<EnvelopeDefinition, ParseError> {
+        skip_spaces_inline(bytes, index);
+        if !matches!(peek(bytes, *index), Some(b'{')) {
+            return Err(ParseError::InvalidEnvelopeDefinition);
+        }
+        *index += 1;
+
+        let mut items = Vec::new();
+        loop {
+            skip_spaces_and_commas(bytes, index);
+            match peek(bytes, *index) {
+                Some(b'}') => {
+                    *index += 1;
+                    break;
+                }
+                Some(byte) if byte.is_ascii_digit() => {
+                    let value =
+                        read_unsigned_number(bytes, index).ok_or(ParseError::InvalidEnvelopeDefinition)?;
+                    items.push(value);
+                }
+                Some(_) | None => return Err(ParseError::InvalidEnvelopeDefinition),
+            }
+        }
+
+        if items.len() < 2 || items[0] == 0 {
+            return Err(ParseError::InvalidEnvelopeDefinition);
+        }
+
+        let speed = items[0];
+        let mut values = Vec::new();
+        let mut loop_start = None;
+        let mut cursor = 1;
+        while cursor < items.len() {
+            let value = items[cursor];
+            if value == 255 {
+                let Some(next_loop_start) = items.get(cursor + 1).copied() else {
+                    return Err(ParseError::InvalidEnvelopeDefinition);
+                };
+                loop_start = Some(next_loop_start);
+                break;
+            }
+            if value > 15 {
+                return Err(ParseError::InvalidEnvelopeDefinition);
+            }
+            values.push(value);
+            cursor += 1;
+        }
+
+        if values.is_empty() {
+            return Err(ParseError::InvalidEnvelopeDefinition);
+        }
+
+        Ok(EnvelopeDefinition {
+            id: envelope_id,
+            speed,
+            values,
+            loop_start,
+        })
+    }
+
+    fn store_envelope_definition(&mut self, definition: EnvelopeDefinition) {
+        if let Some(index) = self
+            .envelope_definitions
+            .iter()
+            .position(|entry| entry.id == definition.id)
+        {
+            self.envelope_definitions[index] = definition;
+        } else {
+            self.envelope_definitions.push(definition);
+        }
+    }
+
+    #[allow(dead_code)]
     fn push_event(
         &mut self,
         kind: u32,
         value: u32,
         length_ticks: u32,
+    ) -> Result<(), ParseFailure> {
+        self.push_event_with_meta(kind, value, length_ticks, PSG_DEFAULT_CHANNEL, 0)
+    }
+
+    fn push_event_with_meta(
+        &mut self,
+        kind: u32,
+        value: u32,
+        length_ticks: u32,
+        channel: u32,
+        param: u32,
     ) -> Result<(), ParseFailure> {
         if self.events.len() >= self.max_events {
             return Err(ParseFailure::at(0, ParseError::TooManyEvents));
@@ -746,11 +1104,13 @@ impl Parser {
             kind,
             value,
             length_ticks,
+            channel,
+            param,
         });
         Ok(())
     }
 
-    fn read_note_number(&self, byte: u8) -> u32 {
+    fn read_note_number(&self, byte: u8, channel: u32) -> u32 {
         let base = match byte {
             b'c' => 0,
             b'd' => 2,
@@ -762,10 +1122,11 @@ impl Parser {
             _ => 0,
         };
 
-        (self.octave * 12 + base) as u32
+        (self.track_state(channel).octave * 12 + base) as u32
     }
 
     fn read_duration(&self, bytes: &[u8], index: &mut usize) -> Result<u32, ParseError> {
+        let state = self.track_state(self.primary_channel());
         let mut duration = match peek(bytes, *index) {
             Some(b':') => {
                 *index += 1;
@@ -781,9 +1142,9 @@ impl Parser {
                 if divider == 0 {
                     return Err(ParseError::InvalidLength);
                 }
-                self.ticks_per_whole / divider
+                state.ticks_per_whole / divider
             }
-            _ => self.default_length,
+            _ => state.default_length,
         };
 
         if duration == 0 {
@@ -800,15 +1161,16 @@ impl Parser {
         Ok(duration)
     }
 
-    fn articulate_duration(&self, total_ticks: u32) -> (u32, u32) {
-        let on_ticks = if self.early_release_ticks > 0 {
-            if self.early_release_ticks >= total_ticks {
+    fn articulate_duration(&self, total_ticks: u32, channel: u32) -> (u32, u32) {
+        let state = self.track_state(channel);
+        let on_ticks = if state.early_release_ticks > 0 {
+            if state.early_release_ticks >= total_ticks {
                 total_ticks.saturating_sub(1).max(1)
             } else {
-                total_ticks - self.early_release_ticks
+                total_ticks - state.early_release_ticks
             }
         } else {
-            (total_ticks * self.quantize_numerator) / self.quantize_denominator
+            (total_ticks * state.quantize_numerator) / state.quantize_denominator
         }
         .max(1)
         .min(total_ticks);
@@ -834,54 +1196,29 @@ impl Parser {
         &mut self,
         duration: u32,
         position: usize,
+        channel: u32,
     ) -> Result<(), ParseFailure> {
-        if self.events.len() >= 2 {
-            let last_index = self.events.len() - 1;
-            let previous_index = self.events.len() - 2;
-
+        if let Some((previous_index, last_index)) = self.find_channel_note_pair(channel) {
             let previous = self.events[previous_index];
             let last = self.events[last_index];
-
-            if previous.kind == EVENT_NOTE_ON
-                && last.kind == EVENT_NOTE_OFF
-                && previous.value == last.value
-                && previous.value != 0
-            {
-                let total_ticks = previous.length_ticks + last.length_ticks + duration;
-                let (on_ticks, off_ticks) = self.articulate_duration(total_ticks);
-                self.events[previous_index].length_ticks = on_ticks;
-                self.events[last_index].length_ticks = off_ticks;
-                return Ok(());
-            }
+            let total_ticks = previous.length_ticks + last.length_ticks + duration;
+            let (on_ticks, off_ticks) = self.articulate_duration(total_ticks, channel);
+            self.events[previous_index].length_ticks = on_ticks;
+            self.events[last_index].length_ticks = off_ticks;
+            return Ok(());
         }
 
-        if let Some(last) = self.events.last_mut()
-            && last.kind == EVENT_NOTE_OFF
-            && last.value == 0
-        {
-            last.length_ticks += duration;
+        if let Some(last_index) = self.find_last_rest_index(channel) {
+            self.events[last_index].length_ticks += duration;
             return Ok(());
         }
 
         Err(ParseFailure::at(position, ParseError::InvalidTie))
     }
 
-    fn slur_previous_note(&mut self, position: usize) -> Result<(), ParseFailure> {
-        if self.events.len() < 2 {
-            return Err(ParseFailure::at(position, ParseError::InvalidSlur));
-        }
-
-        let last_index = self.events.len() - 1;
-        let previous_index = self.events.len() - 2;
-
-        let previous = self.events[previous_index];
-        let last = self.events[last_index];
-
-        if previous.kind == EVENT_NOTE_ON
-            && last.kind == EVENT_NOTE_OFF
-            && previous.value == last.value
-            && previous.value != 0
-        {
+    fn slur_previous_note(&mut self, position: usize, channel: u32) -> Result<(), ParseFailure> {
+        if let Some((previous_index, last_index)) = self.find_channel_note_pair(channel) {
+            let last = self.events[last_index];
             self.events[previous_index].length_ticks += last.length_ticks;
             self.events[last_index].length_ticks = 0;
             return Ok(());
@@ -894,50 +1231,102 @@ impl Parser {
         &mut self,
         duration: u32,
         position: usize,
+        channel: u32,
     ) -> Result<(), ParseFailure> {
-        if self.events.len() >= 2 {
-            let last_index = self.events.len() - 1;
-            let previous_index = self.events.len() - 2;
-
+        if let Some((previous_index, last_index)) = self.find_channel_note_pair(channel) {
             let previous = self.events[previous_index];
             let last = self.events[last_index];
 
-            if previous.kind == EVENT_NOTE_ON
-                && last.kind == EVENT_NOTE_OFF
-                && previous.value == last.value
-                && previous.value != 0
-            {
-                if duration > last.length_ticks {
-                    let remaining = duration - last.length_ticks;
+            if duration > last.length_ticks {
+                let remaining = duration - last.length_ticks;
 
-                    if remaining >= previous.length_ticks {
-                        return Err(ParseFailure::at(position, ParseError::InvalidReverseRest));
-                    }
-
-                    self.events[previous_index].length_ticks -= remaining;
-                    self.events[last_index].length_ticks = 0;
-                    return Ok(());
+                if remaining >= previous.length_ticks {
+                    return Err(ParseFailure::at(position, ParseError::InvalidReverseRest));
                 }
 
-                self.events[last_index].length_ticks -= duration;
+                self.events[previous_index].length_ticks -= remaining;
+                self.events[last_index].length_ticks = 0;
                 return Ok(());
             }
+
+            self.events[last_index].length_ticks -= duration;
+            return Ok(());
         }
 
-        if let Some(last) = self.events.last_mut()
-            && last.kind == EVENT_NOTE_OFF
-            && last.value == 0
-        {
-            if duration > last.length_ticks {
+        if let Some(last_index) = self.find_last_rest_index(channel) {
+            if duration > self.events[last_index].length_ticks {
                 return Err(ParseFailure::at(position, ParseError::InvalidReverseRest));
             }
 
-            last.length_ticks -= duration;
+            self.events[last_index].length_ticks -= duration;
             return Ok(());
         }
 
         Err(ParseFailure::at(position, ParseError::InvalidReverseRest))
     }
+
+    fn find_channel_note_pair(&self, channel: u32) -> Option<(usize, usize)> {
+        let last_index = self.events.iter().rposition(|event| {
+            event.channel == channel
+                && matches!(event.kind, EVENT_NOTE_OFF | EVENT_NOISE_OFF)
+                && event.value != 0
+        })?;
+        let last = self.events[last_index];
+        let previous_index = self.events[..last_index].iter().rposition(|event| {
+            event.channel == channel
+                && matches!(event.kind, EVENT_NOTE_ON | EVENT_NOISE_ON)
+                && event.value == last.value
+        })?;
+        Some((previous_index, last_index))
+    }
+
+    fn find_last_rest_index(&self, channel: u32) -> Option<usize> {
+        self.events.iter().rposition(|event| {
+            event.channel == channel
+                && matches!(event.kind, EVENT_NOTE_OFF | EVENT_NOISE_OFF)
+                && event.value == 0
+        })
+    }
+}
+
+fn parse_track_selector(bytes: &[u8], index: usize) -> Option<(Vec<u32>, usize)> {
+    let mut cursor = index;
+    let mut channels = Vec::new();
+
+    while let Some(byte) = peek(bytes, cursor) {
+        let channel = match byte {
+            b'A' => 0,
+            b'B' => 1,
+            b'C' => 2,
+            b'N' => 3,
+            _ => break,
+        };
+        channels.push(channel);
+        cursor += 1;
+    }
+
+    if channels.is_empty() {
+        return None;
+    }
+
+    match peek(bytes, cursor) {
+        Some(b' ') | Some(b'\t') => {
+            while matches!(peek(bytes, cursor), Some(b' ' | b'\t')) {
+                cursor += 1;
+            }
+            Some((channels, cursor))
+        }
+        Some(b'\n') | Some(b'\r') | None => Some((channels, cursor)),
+        _ => None,
+    }
+}
+
+fn encode_noise_param(volume: u32, noise_mode: u32) -> u32 {
+    (noise_mode << 8) | volume.min(15)
+}
+
+fn noise_frequency_from_note_number(note: u32) -> u32 {
+    600 + note.saturating_mul(40)
 }
 
 fn peek(bytes: &[u8], index: usize) -> Option<u8> {
@@ -950,6 +1339,18 @@ fn skip_comment(bytes: &[u8], index: &mut usize) {
         if byte == b'\n' {
             break;
         }
+    }
+}
+
+fn skip_spaces_inline(bytes: &[u8], index: &mut usize) {
+    while matches!(peek(bytes, *index), Some(b' ' | b'\t' | b'\r')) {
+        *index += 1;
+    }
+}
+
+fn skip_spaces_and_commas(bytes: &[u8], index: &mut usize) {
+    while matches!(peek(bytes, *index), Some(b' ' | b'\t' | b'\r' | b',')) {
+        *index += 1;
     }
 }
 
@@ -1144,80 +1545,134 @@ fn scan_structural_diagnostics(source: &str) -> Vec<ParseFailure> {
 mod tests {
     use super::*;
 
+    fn note_on(value: u32, length_ticks: u32) -> SequenceEvent {
+        SequenceEvent {
+            kind: EVENT_NOTE_ON,
+            value,
+            length_ticks,
+            channel: PSG_DEFAULT_CHANNEL,
+            param: PSG_DEFAULT_VOLUME,
+        }
+    }
+
+    fn note_off(value: u32, length_ticks: u32) -> SequenceEvent {
+        SequenceEvent {
+            kind: EVENT_NOTE_OFF,
+            value,
+            length_ticks,
+            channel: PSG_DEFAULT_CHANNEL,
+            param: 0,
+        }
+    }
+
+    fn tempo(value: u32) -> SequenceEvent {
+        SequenceEvent {
+            kind: EVENT_TEMPO,
+            value,
+            length_ticks: 0,
+            channel: PSG_DEFAULT_CHANNEL,
+            param: 0,
+        }
+    }
+
     #[test]
     fn parses_basic_scale() {
         let parsed = parse_mml("o4 l4 cdefgab>c", 64).expect("parse ok");
 
-        assert_eq!(
-            parsed.events[0],
-            SequenceEvent {
-                kind: EVENT_NOTE_ON,
-                value: 36,
-                length_ticks: 24
-            }
-        );
-        assert_eq!(
-            parsed.events[2],
-            SequenceEvent {
-                kind: EVENT_NOTE_ON,
-                value: 38,
-                length_ticks: 24
-            }
-        );
-        assert_eq!(
-            parsed.events[14],
-            SequenceEvent {
-                kind: EVENT_NOTE_ON,
-                value: 48,
-                length_ticks: 24
-            }
-        );
+        assert_eq!(parsed.events[0], note_on(36, 24));
+        assert_eq!(parsed.events[2], note_on(38, 24));
+        assert_eq!(parsed.events[14], note_on(48, 24));
     }
 
     #[test]
     fn parses_tempo_and_rest() {
         let parsed = parse_mml("t150 o4 l8 c r d", 64).expect("parse ok");
 
+        assert_eq!(parsed.events[0], tempo(150));
+        assert_eq!(parsed.events[1], note_on(36, 12));
+        assert_eq!(parsed.events[3], note_off(0, 12));
+        assert_eq!(parsed.events[4], note_on(38, 12));
+        assert_eq!(parsed.events[5], note_off(38, 0));
+    }
+
+    #[test]
+    fn parses_line_based_tone_channels() {
+        let parsed = parse_mml("A o4 l8 c\nB o3 l8 g\nC o2 l8 c", 64).expect("parse ok");
+
+        assert_eq!(parsed.events[0].channel, 0);
+        assert_eq!(parsed.events[0].value, 36);
+        assert_eq!(parsed.events[0].param, PSG_DEFAULT_VOLUME);
+        assert_eq!(parsed.events[2].channel, 1);
+        assert_eq!(parsed.events[2].value, 31);
+        assert_eq!(parsed.events[4].channel, 2);
+        assert_eq!(parsed.events[4].value, 12);
+    }
+
+    #[test]
+    fn parses_line_based_noise_channel() {
+        let parsed = parse_mml("N l8 o4 c r", 64).expect("parse ok");
+
+        assert_eq!(parsed.events[0].kind, EVENT_NOISE_ON);
+        assert_eq!(parsed.events[0].channel, 3);
+        assert!(parsed.events[0].value > 0);
+        assert_eq!(parsed.events[0].param, encode_noise_param(PSG_DEFAULT_VOLUME, PSG_NOISE_MODE_WHITE));
+        assert_eq!(parsed.events[1].kind, EVENT_NOISE_OFF);
+        assert_eq!(parsed.events[1].channel, 3);
+        assert_eq!(parsed.events[1].value, parsed.events[0].value);
+        assert_eq!(parsed.events[2].kind, EVENT_NOISE_OFF);
+        assert_eq!(parsed.events[2].channel, 3);
+        assert_eq!(parsed.events[2].value, 0);
+    }
+
+    #[test]
+    fn parses_noise_mode_and_volume_events() {
+        let parsed = parse_mml("N v10 w0 c", 64).expect("parse ok");
+
+        assert_eq!(parsed.events[0].kind, EVENT_VOLUME);
+        assert_eq!(parsed.events[0].value, 10);
+        assert_eq!(parsed.events[0].channel, PSG_NOISE_CHANNEL);
+        assert_eq!(parsed.events[0].param, PSG_NOISE_MODE_WHITE);
+        assert_eq!(parsed.events[1].kind, EVENT_VOLUME);
+        assert_eq!(parsed.events[1].value, 10);
+        assert_eq!(parsed.events[1].channel, PSG_NOISE_CHANNEL);
+        assert_eq!(parsed.events[1].param, PSG_NOISE_MODE_PERIODIC);
         assert_eq!(
-            parsed.events[0],
-            SequenceEvent {
-                kind: EVENT_TEMPO,
-                value: 150,
-                length_ticks: 0
-            }
+            parsed.events[2].param,
+            encode_noise_param(10, PSG_NOISE_MODE_PERIODIC)
         );
-        assert_eq!(
-            parsed.events[1],
-            SequenceEvent {
-                kind: EVENT_NOTE_ON,
-                value: 36,
-                length_ticks: 12
-            }
-        );
-        assert_eq!(
-            parsed.events[3],
-            SequenceEvent {
-                kind: EVENT_NOTE_OFF,
-                value: 0,
-                length_ticks: 12
-            }
-        );
-        assert_eq!(
-            parsed.events[4],
-            SequenceEvent {
-                kind: EVENT_NOTE_ON,
-                value: 38,
-                length_ticks: 12
-            }
-        );
-        assert_eq!(
-            parsed.events[5],
-            SequenceEvent {
-                kind: EVENT_NOTE_OFF,
-                value: 38,
-                length_ticks: 0
-            }
-        );
+    }
+
+    #[test]
+    fn rejects_invalid_noise_mode() {
+        let error = parse_mml("N w2 c", 64).expect_err("parse error");
+
+        assert_eq!(error.error, ParseError::InvalidNoiseMode);
+        assert_eq!(error.position, 2);
+    }
+
+    #[test]
+    fn parses_envelope_definition_and_selection() {
+        let parsed = parse_mml("@E1={2,0,4,8,255,1}\nA @E1 v12 c", 64).expect("parse ok");
+
+        assert_eq!(parsed.envelopes.len(), 1);
+        assert_eq!(parsed.envelopes[0].id, 1);
+        assert_eq!(parsed.envelopes[0].speed, 2);
+        assert_eq!(parsed.envelopes[0].values, vec![0, 4, 8]);
+        assert_eq!(parsed.envelopes[0].loop_start, Some(1));
+
+        assert_eq!(parsed.events[0].kind, EVENT_ENVELOPE_SELECT);
+        assert_eq!(parsed.events[0].value, 1);
+        assert_eq!(parsed.events[0].channel, 0);
+        assert_eq!(parsed.events[1].kind, EVENT_VOLUME);
+        assert_eq!(parsed.events[2].kind, EVENT_NOTE_ON);
+    }
+
+    #[test]
+    fn rejects_invalid_envelope_definition() {
+        let error = parse_mml("@E1={0,0,4}\nA c", 64).expect_err("parse error");
+
+        assert_eq!(error.error, ParseError::InvalidEnvelopeDefinition);
+        assert_eq!(error.position, 0);
     }
 
     #[test]
@@ -1369,14 +1824,12 @@ mod tests {
 
     #[test]
     fn formats_unsupported_command_hint() {
-        let diagnostic = ParseFailure::at(3, ParseError::UnexpectedCharacter('v'));
-        let message = format_parse_failure_with_context("o4 v10", &diagnostic, 0);
+        let diagnostic = ParseFailure::at(3, ParseError::UnexpectedCharacter('x'));
+        let message = format_parse_failure_with_context("o4 x10", &diagnostic, 0);
 
-        assert!(message.contains("unexpected character 'v'"));
-        assert!(message.contains("possibly unsupported command 'v'"));
-        assert!(message.contains("v<num> as coarse volume"));
-        assert!(message.contains("try rewriting it like:"));
-        assert!(message.contains("o4 l8 c d e f"));
+        assert!(message.contains("unexpected character 'x'"));
+        assert!(message.contains("possibly unsupported command 'x'"));
+        assert!(message.contains("custom or extended command"));
     }
 
     #[test]
@@ -1411,11 +1864,11 @@ mod tests {
 
     #[test]
     fn returns_multiple_quick_fixes_for_unsupported_command() {
-        let diagnostic = ParseFailure::at(3, ParseError::UnexpectedCharacter('v'));
-        let fixes = parse_failure_quick_fixes("o4 v10", &diagnostic);
+        let diagnostic = ParseFailure::at(3, ParseError::UnexpectedCharacter('x'));
+        let fixes = parse_failure_quick_fixes("o4 x10", &diagnostic);
 
-        assert!(fixes.len() >= 2);
-        assert_eq!(fixes[0].label, "仕様に近い最小例");
+        assert!(!fixes.is_empty());
+        assert!(fixes[0].label.contains("最小"));
         assert!(fixes.iter().any(|entry| entry.replacement == "o4 l8 c d e f"));
     }
 
