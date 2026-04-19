@@ -6,24 +6,26 @@ const a = {
   noiseOn: 5,
   noiseOff: 6,
   envelopeSelect: 7
-}, r = (o) => {
-  const e = new Uint32Array(o.events.length * 5);
-  return o.events.forEach((t, i) => {
+}, r = (t) => {
+  const e = new Uint32Array(t.events.length * 5);
+  return t.events.forEach((o, i) => {
     const n = i * 5;
-    e[n] = a[t.kind], e[n + 1] = t.value >>> 0, e[n + 2] = t.deltaTicks >>> 0, e[n + 3] = t.channel >>> 0, e[n + 4] = t.param >>> 0;
+    e[n] = a[o.kind], e[n + 1] = o.value >>> 0, e[n + 2] = o.deltaTicks >>> 0, e[n + 3] = o.channel >>> 0, e[n + 4] = o.param >>> 0;
   }), {
-    bpm: o.events.find((t) => t.kind === "tempo")?.value ?? 124,
-    ticksPerBeat: o.ticksPerBeat,
+    bpm: t.events.find((o) => o.kind === "tempo")?.value ?? 124,
+    ticksPerBeat: t.ticksPerBeat,
+    loopCount: t.loopCount ?? 0,
+    tailTicks: t.tailTicks ?? 0,
     sequenceEvents: e,
     eventStride: 5,
-    envelopes: o.envelopes
+    envelopes: t.envelopes
   };
 }, l = new URL(
   /* @vite-ignore */
   "./mkvdrv-processor.worklet.js",
   import.meta.url
 ).href;
-class c {
+class d {
   audioContext;
   workletNode;
   currentSong;
@@ -33,7 +35,7 @@ class c {
   noteFrequencies;
   initialFrequency;
   constructor(e) {
-    this.initialFrequency = e?.initialFrequency ?? 440, this.wavetable = u(e?.wavetableSize ?? 2048), this.noteFrequencies = d();
+    this.initialFrequency = e?.initialFrequency ?? 440, this.wavetable = u(e?.wavetableSize ?? 2048), this.noteFrequencies = c();
   }
   async initialize() {
     this.audioContext || (this.audioContext = new AudioContext(), await this.audioContext.audioWorklet.addModule(l)), this.workletNode || (this.workletNode = new AudioWorkletNode(
@@ -51,8 +53,8 @@ class c {
     const s = await fetch(e);
     if (!s.ok)
       throw new Error(`Failed to load song JSON: ${s.status} ${s.statusText}`);
-    const t = await s.json();
-    await this.loadSong(t);
+    const o = await s.json();
+    await this.loadSong(o);
   }
   async play() {
     if (!this.currentSong)
@@ -90,17 +92,17 @@ class c {
     };
   }
 }
-const u = (o) => {
-  const e = Math.max(32, o | 0), s = new Float32Array(e);
-  for (let t = 0; t < e; t += 1)
-    s[t] = Math.sin(t / e * Math.PI * 2);
+const u = (t) => {
+  const e = Math.max(32, t | 0), s = new Float32Array(e);
+  for (let o = 0; o < e; o += 1)
+    s[o] = Math.sin(o / e * Math.PI * 2);
   return s;
-}, d = () => {
-  const o = new Float32Array(128);
-  for (let e = 0; e < o.length; e += 1)
-    o[e] = 440 * 2 ** ((e - 69) / 12);
-  return o;
+}, c = () => {
+  const t = new Float32Array(128);
+  for (let e = 0; e < t.length; e += 1)
+    t[e] = 440 * 2 ** ((e - 69) / 12);
+  return t;
 };
 export {
-  c as MkvdrvGameAudioEngine
+  d as MkvdrvGameAudioEngine
 };

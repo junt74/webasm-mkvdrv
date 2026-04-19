@@ -674,6 +674,7 @@ impl Parser {
                 }
                 b';' => {
                     skip_comment(bytes, &mut index);
+                    at_line_start = true;
                 }
                 b'@' => {
                     index += 1;
@@ -1766,6 +1767,17 @@ mod tests {
         assert_eq!(parsed.events[2].kind, EVENT_NOISE_OFF);
         assert_eq!(parsed.events[2].channel, 3);
         assert_eq!(parsed.events[2].value, 0);
+    }
+
+    #[test]
+    fn parses_track_selector_after_comment_line() {
+        let parsed = parse_mml("t132\n;A o4 l8 c\nN l8 v10 c r", 64).expect("parse ok");
+
+        assert_eq!(parsed.events[0].kind, EVENT_TEMPO);
+        assert_eq!(parsed.events[1].kind, EVENT_VOLUME);
+        assert_eq!(parsed.events[1].channel, PSG_NOISE_CHANNEL);
+        assert_eq!(parsed.events[2].kind, EVENT_NOISE_ON);
+        assert_eq!(parsed.events[2].channel, PSG_NOISE_CHANNEL);
     }
 
     #[test]

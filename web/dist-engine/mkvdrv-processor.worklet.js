@@ -31,7 +31,11 @@
     releaseRate = 18e-4;
     bpm = 124;
     ticksPerBeat = 96;
+    loopCount = 0;
+    loopsRemaining = 0;
+    tailTicks = 0;
     sequenceIndex = 0;
+    pendingTerminalAction = "none";
     eventSamplesRemaining = 0;
     samplesPerTick;
     tickSamplesRemaining;
@@ -63,6 +67,9 @@ Frequency: ${this.previewFrequency.toFixed(0)} Hz`;
       this.mode = "sequence";
       this.bpm = payload.bpm;
       this.ticksPerBeat = payload.ticksPerBeat;
+      this.loopCount = payload.loopCount;
+      this.loopsRemaining = this.loopCount < 0 ? -1 : Math.max(0, this.loopCount);
+      this.tailTicks = payload.tailTicks;
       this.samplesPerTick = 60 / this.bpm / this.ticksPerBeat * this.sampleRateValue;
       this.tickSamplesRemaining = this.samplesPerTick;
       this.sequenceEvents = new Uint32Array(payload.sequenceEvents);
@@ -72,10 +79,11 @@ Frequency: ${this.previewFrequency.toFixed(0)} Hz`;
       );
       this.sequenceIndex = 0;
       this.eventSamplesRemaining = 0;
+      this.pendingTerminalAction = "none";
       this.resetChannels();
       this.advanceSequenceEvent();
       return `Sequence ready.
-Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.eventStride}`;
+Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.eventStride}, loop: ${this.loopCount}`;
     }
     stop() {
       this.mode = "idle";
@@ -116,6 +124,13 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
       for (let index = 0; index < left.length; index += 1) {
         if (this.mode === "sequence") {
           while (this.eventSamplesRemaining <= 0) {
+            if (this.pendingTerminalAction !== "none") {
+              this.resolvePendingTerminalAction();
+              if (this.mode !== "sequence" || this.eventSamplesRemaining > 0) {
+                break;
+              }
+              continue;
+            }
             this.advanceSequenceEvent();
             if (this.mode !== "sequence") {
               break;
@@ -369,10 +384,6 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
       const noiseSettings = this.decodeNoiseParam(param);
       const noiseAmplitude = this.decodePsgAmplitude(noiseSettings.volume);
       if (eventKind === _MkvdrvSongRuntime.EVENT_NOTE_ON) {
-        const eventSamples = Math.max(
-          1,
-          Math.round(60 / this.bpm / this.ticksPerBeat * this.sampleRateValue * lengthTicks)
-        );
         if (channel < _MkvdrvSongRuntime.PSG_TONE_CHANNELS) {
           this.setToneChannel(
             channel,
@@ -381,22 +392,15 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
             true
           );
         }
-        this.eventSamplesRemaining = eventSamples;
       } else if (eventKind === _MkvdrvSongRuntime.EVENT_NOTE_OFF) {
-        const eventSamples = Math.max(
-          1,
-          Math.round(60 / this.bpm / this.ticksPerBeat * this.sampleRateValue * lengthTicks)
-        );
         if (channel < _MkvdrvSongRuntime.PSG_TONE_CHANNELS) {
           this.setToneChannel(channel, 0, 0);
         } else if (channel === _MkvdrvSongRuntime.PSG_NOISE_CHANNEL) {
           this.setNoiseChannel(0, 0);
         }
-        this.eventSamplesRemaining = eventSamples;
       } else if (eventKind === _MkvdrvSongRuntime.EVENT_TEMPO) {
         this.bpm = value;
         this.samplesPerTick = 60 / this.bpm / this.ticksPerBeat * this.sampleRateValue;
-        this.eventSamplesRemaining = 0;
       } else if (eventKind === _MkvdrvSongRuntime.EVENT_VOLUME) {
         if (channel < _MkvdrvSongRuntime.PSG_TONE_CHANNELS) {
           const toneChannel = this.toneChannels[channel];
@@ -409,7 +413,6 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
           this.noiseChannel.mode = param;
           this.refreshNoiseTarget();
         }
-        this.eventSamplesRemaining = 0;
       } else if (eventKind === _MkvdrvSongRuntime.EVENT_ENVELOPE_SELECT) {
         if (channel < _MkvdrvSongRuntime.PSG_TONE_CHANNELS) {
           const toneChannel = this.toneChannels[channel];
@@ -427,31 +430,96 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
             this.refreshNoiseTarget();
           }
         }
-        this.eventSamplesRemaining = 0;
       } else if (eventKind === _MkvdrvSongRuntime.EVENT_NOISE_ON) {
-        const eventSamples = Math.max(
-          1,
-          Math.round(60 / this.bpm / this.ticksPerBeat * this.sampleRateValue * lengthTicks)
-        );
         this.setNoiseChannel(
           value,
           noiseAmplitude || this.decodePsgAmplitude(8),
           noiseSettings.mode,
           true
         );
-        this.eventSamplesRemaining = eventSamples;
       } else if (eventKind === _MkvdrvSongRuntime.EVENT_NOISE_OFF) {
-        const eventSamples = Math.max(
-          1,
-          Math.round(60 / this.bpm / this.ticksPerBeat * this.sampleRateValue * lengthTicks)
-        );
         this.setNoiseChannel(0, 0);
-        this.eventSamplesRemaining = eventSamples;
       } else {
         this.silenceAllChannels();
-        this.eventSamplesRemaining = 0;
       }
-      this.sequenceIndex = (this.sequenceIndex + 1) % (this.sequenceEvents.length / this.eventStride);
+      const eventCount = this.sequenceEvents.length / this.eventStride;
+      const nextSequenceIndex = this.sequenceIndex + 1;
+      if (nextSequenceIndex >= eventCount) {
+        const terminalDelaySamples = this.readTailDelaySamples();
+        if (this.loopsRemaining < 0) {
+          if (terminalDelaySamples > 0) {
+            this.pendingTerminalAction = "wrap";
+            this.eventSamplesRemaining = terminalDelaySamples;
+            return;
+          }
+          this.sequenceIndex = 0;
+          this.eventSamplesRemaining = this.readUpcomingEventDelaySamples();
+          return;
+        }
+        if (this.loopsRemaining > 0) {
+          this.loopsRemaining -= 1;
+          if (terminalDelaySamples > 0) {
+            this.pendingTerminalAction = "wrap";
+            this.eventSamplesRemaining = terminalDelaySamples;
+            return;
+          }
+          this.sequenceIndex = 0;
+          this.eventSamplesRemaining = this.readUpcomingEventDelaySamples();
+          return;
+        }
+        if (terminalDelaySamples > 0) {
+          this.pendingTerminalAction = "stop";
+          this.eventSamplesRemaining = terminalDelaySamples;
+          return;
+        }
+        this.sequenceIndex = eventCount;
+        this.eventSamplesRemaining = 0;
+        this.mode = "idle";
+        return;
+      }
+      this.sequenceIndex = nextSequenceIndex;
+      this.eventSamplesRemaining = this.readUpcomingEventDelaySamples();
+    }
+    resolvePendingTerminalAction() {
+      const action = this.pendingTerminalAction;
+      this.pendingTerminalAction = "none";
+      if (action === "wrap") {
+        this.sequenceIndex = 0;
+        this.eventSamplesRemaining = this.readUpcomingEventDelaySamples();
+        return;
+      }
+      if (action === "stop") {
+        this.sequenceIndex = this.sequenceEvents.length / this.eventStride;
+        this.eventSamplesRemaining = 0;
+        this.mode = "idle";
+      }
+    }
+    readUpcomingEventDelaySamples() {
+      if (this.sequenceEvents.length === 0) {
+        return 0;
+      }
+      const nextBase = this.sequenceIndex * this.eventStride;
+      const deltaTicks = this.sequenceEvents[nextBase + 2] ?? 0;
+      if (deltaTicks <= 0) {
+        return 0;
+      }
+      return Math.max(
+        1,
+        Math.round(
+          60 / this.bpm / this.ticksPerBeat * this.sampleRateValue * deltaTicks
+        )
+      );
+    }
+    readTailDelaySamples() {
+      if (this.tailTicks <= 0) {
+        return 0;
+      }
+      return Math.max(
+        1,
+        Math.round(
+          60 / this.bpm / this.ticksPerBeat * this.sampleRateValue * this.tailTicks
+        )
+      );
     }
     updateEnvelope(current, target) {
       const rate = target > current ? this.attackRate : this.releaseRate;
@@ -547,6 +615,8 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
             this.runtime.loadSequence({
               bpm: message.bpm,
               ticksPerBeat: message.ticksPerBeat,
+              loopCount: message.loopCount,
+              tailTicks: message.tailTicks,
               sequenceEvents: message.sequenceEvents,
               eventStride: message.eventStride,
               envelopes: message.envelopes
