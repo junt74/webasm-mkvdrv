@@ -82,20 +82,240 @@ button {
   margin-bottom: 16px;
 }
 
-.control input {
+.control input,
+.control select {
   width: 100%;
 }
 
+.control-compact {
+  max-width: 220px;
+}
+
+.sample-select {
+  padding: 11px 14px;
+  border: 1px solid rgba(107, 74, 36, 0.18);
+  border-radius: 14px;
+  background: rgba(255, 252, 248, 0.95);
+  color: #1f1b16;
+  font: inherit;
+}
+
+.mml-legend {
+  width: min(100%, 680px);
+  margin: -2px 0 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+}
+
+.mml-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #5a4837;
+  font-size: 0.88rem;
+}
+
+.mml-legend-chip {
+  display: inline-block;
+  width: 0.95rem;
+  height: 0.95rem;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: inset 0 0 0 1px rgba(31, 27, 22, 0.08);
+}
+
+.mml-editor-shell {
+  position: relative;
+  width: min(100%, 680px);
+}
+
+.mml-overlay,
 .mml-editor {
   min-height: 120px;
-  width: min(100%, 680px);
+  width: 100%;
   padding: 14px 16px;
+  font: 0.95rem/1.7 "SFMono-Regular", "Cascadia Code", monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.mml-overlay {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  overflow: hidden;
   border: 1px solid rgba(107, 74, 36, 0.18);
   border-radius: 16px;
   background: rgba(255, 252, 248, 0.95);
   color: #1f1b16;
-  font: 0.95rem/1.7 "SFMono-Regular", "Cascadia Code", monospace;
+  pointer-events: none;
+}
+
+.mml-overlay span {
+  color: inherit;
+}
+
+.mml-line-active {
+  background: rgba(211, 146, 40, 0.08);
+}
+
+.mml-token-space,
+.mml-token-text {
+  color: #3a2d23;
+}
+
+.mml-token-note {
+  color: #a6421c;
+  font-weight: 600;
+}
+
+.mml-token-command {
+  color: #0f6c66;
+  font-weight: 600;
+}
+
+.mml-token-number {
+  color: #8f4e17;
+}
+
+.mml-token-operator {
+  color: #6a35a8;
+}
+
+.mml-token-bracket {
+  color: #295eaa;
+  font-weight: 600;
+}
+
+.mml-token-bar,
+.mml-token-dot {
+  color: #7b6a58;
+}
+
+.mml-token-comment {
+  color: #8f8a82;
+  font-style: italic;
+}
+
+.mml-overlay-error {
+  padding: 0 0.08em;
+  border-radius: 0.3em;
+  background: rgba(195, 67, 28, 0.22);
+  box-shadow: inset 0 -1px 0 rgba(195, 67, 28, 0.55);
+}
+
+.mml-overlay-error-multi {
+  background: rgba(195, 67, 28, 0.3);
+  box-shadow:
+    inset 0 -1px 0 rgba(195, 67, 28, 0.75),
+    0 0 0 1px rgba(195, 67, 28, 0.18);
+}
+
+.mml-overlay-related {
+  background: rgba(211, 146, 40, 0.18);
+  box-shadow: inset 0 -1px 0 rgba(143, 78, 23, 0.45);
+}
+
+.mml-editor {
+  position: relative;
+  border: 1px solid rgba(107, 74, 36, 0.18);
+  border-radius: 16px;
+  background: transparent;
+  color: transparent;
+  caret-color: #1f1b16;
   resize: vertical;
+}
+
+.mml-editor::selection {
+  background: rgba(211, 146, 40, 0.28);
+}
+
+.mml-editor::-webkit-scrollbar {
+  width: 12px;
+}
+
+.mml-editor::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: rgba(143, 78, 23, 0.35);
+  background-clip: padding-box;
+}
+
+.mml-editor::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.mml-editor:focus {
+  outline: none;
+}
+
+.mml-editor-shell:focus-within .mml-overlay {
+  border-color: rgba(181, 93, 31, 0.42);
+  box-shadow: 0 0 0 3px rgba(211, 146, 40, 0.14);
+}
+
+.mml-editor-shell .mml-editor-error {
+  box-shadow: none;
+}
+
+.mml-editor-error {
+  border-color: #c3431c;
+}
+
+.mml-editor-shell-error .mml-overlay {
+  border-color: #c3431c;
+  box-shadow: 0 0 0 3px rgba(195, 67, 28, 0.14);
+}
+
+.mml-error {
+  width: min(100%, 680px);
+  margin: -4px 0 16px;
+  padding: 14px 16px;
+  border: 1px solid rgba(195, 67, 28, 0.28);
+  border-radius: 16px;
+  background: rgba(255, 240, 232, 0.95);
+  color: #5f2614;
+}
+
+.mml-error strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.mml-error-summary,
+.mml-error-context {
+  margin: 0;
+}
+
+.mml-error-summary {
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.mml-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.mml-error-jump {
+  border: 0;
+  border-radius: 999px;
+  padding: 8px 12px;
+  background: rgba(95, 38, 20, 0.12);
+  color: #5f2614;
+  cursor: pointer;
+}
+
+.mml-error-context {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(95, 38, 20, 0.08);
+  overflow-x: auto;
+  font: 0.92rem/1.6 "SFMono-Regular", "Cascadia Code", monospace;
 }
 
 .log {

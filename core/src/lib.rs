@@ -3,7 +3,10 @@ mod mml;
 use core::f32::consts::TAU;
 use core::str;
 
-use mml::parse_mml;
+use mml::{
+    collect_parse_diagnostics_with_context, format_parse_failure_with_context,
+    parse_mml_with_context, ParseFailure,
+};
 
 #[cfg(test)]
 use mml::{EVENT_NOTE_OFF, EVENT_NOTE_ON, EVENT_TEMPO};
@@ -23,6 +26,23 @@ static mut NOTE_FREQUENCIES: [f32; NOTE_FREQUENCY_CAPACITY] = [0.0; NOTE_FREQUEN
 static mut SEQUENCE_EVENTS: [u32; SEQUENCE_EVENT_CAPACITY * SEQUENCE_EVENT_STRIDE] =
     [0; SEQUENCE_EVENT_CAPACITY * SEQUENCE_EVENT_STRIDE];
 static mut MML_INPUT_BUFFER: [u8; MML_INPUT_CAPACITY] = [0; MML_INPUT_CAPACITY];
+const LAST_PARSE_ERROR_MESSAGE_CAPACITY: usize = 256;
+const PARSE_DIAGNOSTIC_CAPACITY: usize = 16;
+const PARSE_DIAGNOSTIC_MESSAGE_CAPACITY: usize = 128;
+static mut LAST_PARSE_ERROR_MESSAGE: [u8; LAST_PARSE_ERROR_MESSAGE_CAPACITY] =
+    [0; LAST_PARSE_ERROR_MESSAGE_CAPACITY];
+static mut LAST_PARSE_ERROR_MESSAGE_LEN: usize = 0;
+static mut LAST_PARSE_ERROR_POSITION: usize = 0;
+static mut PARSE_DIAGNOSTIC_COUNT: usize = 0;
+static mut PARSE_DIAGNOSTIC_POSITIONS: [usize; PARSE_DIAGNOSTIC_CAPACITY] = [0; PARSE_DIAGNOSTIC_CAPACITY];
+static mut PARSE_DIAGNOSTIC_ENDS: [usize; PARSE_DIAGNOSTIC_CAPACITY] = [0; PARSE_DIAGNOSTIC_CAPACITY];
+static mut PARSE_DIAGNOSTIC_RELATED_POSITIONS: [usize; PARSE_DIAGNOSTIC_CAPACITY] =
+    [usize::MAX; PARSE_DIAGNOSTIC_CAPACITY];
+static mut PARSE_DIAGNOSTIC_MESSAGE_LENS: [usize; PARSE_DIAGNOSTIC_CAPACITY] =
+    [0; PARSE_DIAGNOSTIC_CAPACITY];
+static mut PARSE_DIAGNOSTIC_MESSAGES: [u8; PARSE_DIAGNOSTIC_CAPACITY * PARSE_DIAGNOSTIC_MESSAGE_CAPACITY] =
+    [0; PARSE_DIAGNOSTIC_CAPACITY * PARSE_DIAGNOSTIC_MESSAGE_CAPACITY];
+static mut CONDITIONAL_BRANCH_INDEX: usize = 0;
 
 const DEMO_MML: &str = "t124 o4 l16 ceg>c<g e c r dfa>b<a f d r";
 
@@ -101,25 +121,174 @@ pub extern "C" fn mkvdrv_mml_input_buffer_capacity() -> usize {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_set_conditional_branch_index(branch_index: usize) {
+    unsafe {
+        CONDITIONAL_BRANCH_INDEX = branch_index;
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_conditional_branch_index() -> usize {
+    unsafe { CONDITIONAL_BRANCH_INDEX }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_last_parse_error_message_ptr() -> *const u8 {
+    core::ptr::addr_of!(LAST_PARSE_ERROR_MESSAGE).cast::<u8>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_last_parse_error_message_len() -> usize {
+    unsafe { LAST_PARSE_ERROR_MESSAGE_LEN }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_last_parse_error_position() -> usize {
+    unsafe { LAST_PARSE_ERROR_POSITION }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_parse_diagnostic_count() -> usize {
+    unsafe { PARSE_DIAGNOSTIC_COUNT }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_parse_diagnostic_positions_ptr() -> *const usize {
+    core::ptr::addr_of!(PARSE_DIAGNOSTIC_POSITIONS).cast::<usize>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_parse_diagnostic_ends_ptr() -> *const usize {
+    core::ptr::addr_of!(PARSE_DIAGNOSTIC_ENDS).cast::<usize>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_parse_diagnostic_related_positions_ptr() -> *const usize {
+    core::ptr::addr_of!(PARSE_DIAGNOSTIC_RELATED_POSITIONS).cast::<usize>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_parse_diagnostic_message_lens_ptr() -> *const usize {
+    core::ptr::addr_of!(PARSE_DIAGNOSTIC_MESSAGE_LENS).cast::<usize>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_parse_diagnostic_messages_ptr() -> *const u8 {
+    core::ptr::addr_of!(PARSE_DIAGNOSTIC_MESSAGES).cast::<u8>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_parse_diagnostic_message_stride() -> usize {
+    PARSE_DIAGNOSTIC_MESSAGE_CAPACITY
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn mkvdrv_parse_mml_from_buffer(input_len: usize) -> usize {
     let len = input_len.min(MML_INPUT_CAPACITY);
     let source = unsafe { str::from_utf8_unchecked(&MML_INPUT_BUFFER[..len]) };
-    fill_sequence_events_from_mml(source).unwrap_or_default()
+    fill_sequence_events_from_mml(source).unwrap_or_else(|error| {
+        store_parse_failures(source, &error);
+        0
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn mkvdrv_fill_demo_sequence() -> usize {
-    fill_sequence_events_from_mml(DEMO_MML).unwrap_or_default()
+    fill_sequence_events_from_mml(DEMO_MML).unwrap_or_else(|error| {
+        store_parse_failures(DEMO_MML, &error);
+        0
+    })
 }
 
-fn fill_sequence_events_from_mml(source: &str) -> Result<usize, mml::ParseError> {
-    let parsed = parse_mml(source, SEQUENCE_EVENT_CAPACITY)?;
+fn fill_sequence_events_from_mml(source: &str) -> Result<usize, ParseFailure> {
+    let branch_index = unsafe { CONDITIONAL_BRANCH_INDEX };
+    let parsed = parse_mml_with_context(source, SEQUENCE_EVENT_CAPACITY, branch_index)?;
 
     for (index, event) in parsed.events.iter().enumerate() {
         write_event(index, event.kind, event.value, event.length_ticks);
     }
 
+    clear_parse_failure();
     Ok(parsed.events.len())
+}
+
+fn clear_parse_failure() {
+    unsafe {
+        LAST_PARSE_ERROR_MESSAGE_LEN = 0;
+        LAST_PARSE_ERROR_POSITION = 0;
+        PARSE_DIAGNOSTIC_COUNT = 0;
+        for index in 0..LAST_PARSE_ERROR_MESSAGE_CAPACITY {
+            LAST_PARSE_ERROR_MESSAGE[index] = 0;
+        }
+        for index in 0..PARSE_DIAGNOSTIC_CAPACITY {
+            PARSE_DIAGNOSTIC_POSITIONS[index] = 0;
+            PARSE_DIAGNOSTIC_ENDS[index] = 0;
+            PARSE_DIAGNOSTIC_RELATED_POSITIONS[index] = usize::MAX;
+            PARSE_DIAGNOSTIC_MESSAGE_LENS[index] = 0;
+        }
+        for index in 0..(PARSE_DIAGNOSTIC_CAPACITY * PARSE_DIAGNOSTIC_MESSAGE_CAPACITY) {
+            PARSE_DIAGNOSTIC_MESSAGES[index] = 0;
+        }
+    }
+}
+
+fn store_parse_failures(source: &str, primary_error: &ParseFailure) {
+    let branch_index = unsafe { CONDITIONAL_BRANCH_INDEX };
+    let diagnostics =
+        collect_parse_diagnostics_with_context(source, SEQUENCE_EVENT_CAPACITY, branch_index);
+    let first_error = diagnostics.first().unwrap_or(primary_error);
+
+    store_last_parse_failure(source, first_error, branch_index);
+    store_parse_diagnostics(source, &diagnostics, branch_index);
+}
+
+fn store_last_parse_failure(source: &str, error: &ParseFailure, branch_index: usize) {
+    let message = format_parse_failure_with_context(source, error, branch_index);
+    let bytes = message.as_bytes();
+    let copy_len = bytes.len().min(LAST_PARSE_ERROR_MESSAGE_CAPACITY);
+
+    unsafe {
+        for index in 0..LAST_PARSE_ERROR_MESSAGE_CAPACITY {
+            LAST_PARSE_ERROR_MESSAGE[index] = 0;
+        }
+        for (index, byte) in bytes.iter().take(copy_len).enumerate() {
+            LAST_PARSE_ERROR_MESSAGE[index] = *byte;
+        }
+        LAST_PARSE_ERROR_MESSAGE_LEN = copy_len;
+        LAST_PARSE_ERROR_POSITION = error.position;
+    }
+}
+
+fn store_parse_diagnostics(source: &str, diagnostics: &[ParseFailure], branch_index: usize) {
+    let count = diagnostics.len().min(PARSE_DIAGNOSTIC_CAPACITY);
+
+    unsafe {
+        PARSE_DIAGNOSTIC_COUNT = count;
+    }
+
+    for (index, diagnostic) in diagnostics.iter().take(count).enumerate() {
+        let start = index * PARSE_DIAGNOSTIC_MESSAGE_CAPACITY;
+        let end = start + PARSE_DIAGNOSTIC_MESSAGE_CAPACITY;
+        let message = format_parse_failure_with_context(source, diagnostic, branch_index);
+        let bytes = message.as_bytes();
+        let copy_len = bytes.len().min(PARSE_DIAGNOSTIC_MESSAGE_CAPACITY);
+
+        unsafe {
+            PARSE_DIAGNOSTIC_POSITIONS[index] = diagnostic.position;
+            PARSE_DIAGNOSTIC_ENDS[index] = diagnostic.end_position(source.len());
+            PARSE_DIAGNOSTIC_RELATED_POSITIONS[index] =
+                diagnostic.related_position.unwrap_or(usize::MAX);
+            PARSE_DIAGNOSTIC_MESSAGE_LENS[index] = copy_len;
+
+            for slot in start..end {
+                PARSE_DIAGNOSTIC_MESSAGES[slot] = 0;
+            }
+
+            for (offset, byte) in bytes.iter().take(copy_len).enumerate() {
+                PARSE_DIAGNOSTIC_MESSAGES[start + offset] = *byte;
+            }
+        }
+    }
 }
 
 fn write_event(index: usize, event_kind: u32, value: u32, length_ticks: u32) {
@@ -135,15 +304,26 @@ fn write_event(index: usize, event_kind: u32, value: u32, length_ticks: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_test_state() -> MutexGuard<'static, ()> {
+        TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn returns_init_message() {
+        let _guard = lock_test_state();
         let message = str::from_utf8(INIT_MESSAGE).expect("valid UTF-8");
         assert_eq!(message, "MKVDRV-Wasm core initialized");
     }
 
     #[test]
     fn fills_wavetable() {
+        let _guard = lock_test_state();
         let len = mkvdrv_fill_sine_wavetable(32);
 
         assert_eq!(len, 32);
@@ -157,6 +337,7 @@ mod tests {
 
     #[test]
     fn fills_note_frequencies() {
+        let _guard = lock_test_state();
         let len = mkvdrv_fill_note_frequencies();
 
         assert_eq!(len, NOTE_FREQUENCY_CAPACITY);
@@ -170,6 +351,7 @@ mod tests {
 
     #[test]
     fn fills_demo_sequence_from_mml() {
+        let _guard = lock_test_state();
         let event_count = mkvdrv_fill_demo_sequence();
 
         assert!(event_count >= 3);
@@ -188,6 +370,7 @@ mod tests {
 
     #[test]
     fn parses_mml_from_buffer() {
+        let _guard = lock_test_state();
         let input = b"t150 o4 l8 c r d";
 
         unsafe {
@@ -201,5 +384,88 @@ mod tests {
         assert_eq!(unsafe { SEQUENCE_EVENTS[1] }, 150);
         assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE] }, EVENT_NOTE_ON);
         assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE + 1] }, 36);
+    }
+
+    #[test]
+    fn stores_last_parse_error_details() {
+        let _guard = lock_test_state();
+        let input = b"o4 C c";
+
+        unsafe {
+            MML_INPUT_BUFFER[..input.len()].copy_from_slice(input);
+        }
+
+        let event_count = mkvdrv_parse_mml_from_buffer(input.len());
+
+        assert_eq!(event_count, 0);
+        assert_eq!(mkvdrv_last_parse_error_position(), 3);
+
+        let message = unsafe {
+            str::from_utf8_unchecked(&LAST_PARSE_ERROR_MESSAGE[..mkvdrv_last_parse_error_message_len()])
+        };
+        assert!(message.contains("missing parameter for 'C'"));
+        assert!(message.contains("ticks-per-whole expects a number"));
+        assert_eq!(mkvdrv_parse_diagnostic_count(), 1);
+    }
+
+    #[test]
+    fn applies_conditional_branch_index_to_parse() {
+        let _guard = lock_test_state();
+        mkvdrv_set_conditional_branch_index(1);
+
+        let input = b"o4 c{d/e/f}";
+
+        unsafe {
+            MML_INPUT_BUFFER[..input.len()].copy_from_slice(input);
+        }
+
+        let event_count = mkvdrv_parse_mml_from_buffer(input.len());
+
+        assert_eq!(event_count, 4);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2 + 1] }, 40);
+
+        mkvdrv_set_conditional_branch_index(0);
+    }
+
+    #[test]
+    fn stores_multiple_parse_diagnostics() {
+        let _guard = lock_test_state();
+        let input = b"o4 ] c { d";
+
+        unsafe {
+            MML_INPUT_BUFFER[..input.len()].copy_from_slice(input);
+        }
+
+        let event_count = mkvdrv_parse_mml_from_buffer(input.len());
+
+        assert_eq!(event_count, 0);
+        assert_eq!(mkvdrv_parse_diagnostic_count(), 2);
+        assert_eq!(unsafe { PARSE_DIAGNOSTIC_POSITIONS[0] }, 3);
+        assert_eq!(unsafe { PARSE_DIAGNOSTIC_POSITIONS[1] }, 7);
+        assert_eq!(unsafe { PARSE_DIAGNOSTIC_RELATED_POSITIONS[1] }, 7);
+
+        let first_len = unsafe { PARSE_DIAGNOSTIC_MESSAGE_LENS[0] };
+        let first_message = unsafe {
+            str::from_utf8_unchecked(&PARSE_DIAGNOSTIC_MESSAGES[..first_len])
+        };
+        assert!(first_message.contains("found loop close without a matching '['"));
+    }
+
+    #[test]
+    fn stores_related_opening_position_for_parser_error() {
+        let _guard = lock_test_state();
+        mkvdrv_set_conditional_branch_index(0);
+        let input = b"[c{x/e}]";
+
+        unsafe {
+            MML_INPUT_BUFFER[..input.len()].copy_from_slice(input);
+        }
+
+        let event_count = mkvdrv_parse_mml_from_buffer(input.len());
+
+        assert_eq!(event_count, 0);
+        assert_eq!(mkvdrv_parse_diagnostic_count(), 1);
+        assert_eq!(unsafe { PARSE_DIAGNOSTIC_POSITIONS[0] }, 3);
+        assert_eq!(unsafe { PARSE_DIAGNOSTIC_RELATED_POSITIONS[0] }, 2);
     }
 }
