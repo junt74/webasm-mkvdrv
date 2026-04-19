@@ -37,6 +37,39 @@ button {
   backdrop-filter: blur(10px);
 }
 
+.hero {
+  display: grid;
+  gap: 22px;
+}
+
+.sticky-header {
+  position: sticky;
+  top: 14px;
+  z-index: 20;
+  margin: -4px -4px 0;
+  padding: 8px 8px 18px;
+  border-radius: 22px;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 249, 241, 0.96) 0%,
+    rgba(255, 249, 241, 0.92) 100%
+  );
+  box-shadow: 0 10px 30px rgba(68, 44, 14, 0.08);
+  backdrop-filter: blur(14px);
+}
+
+.sticky-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 16px;
+  align-items: start;
+}
+
+.editor-area {
+  display: grid;
+  gap: 14px;
+}
+
 .hero h1 {
   margin: 0;
   font-size: clamp(2.6rem, 7vw, 4.8rem);
@@ -57,6 +90,7 @@ button {
   max-width: 52rem;
   font-size: 1.05rem;
   line-height: 1.8;
+  margin-bottom: 0;
 }
 
 .actions {
@@ -75,11 +109,37 @@ button {
   cursor: pointer;
 }
 
+.secondary-button {
+  border: 1px solid rgba(107, 74, 36, 0.18);
+  border-radius: 14px;
+  padding: 11px 16px;
+  background: rgba(255, 252, 248, 0.95);
+  color: #5b3617;
+  cursor: pointer;
+}
+
 .control {
   display: grid;
   gap: 8px;
   max-width: 420px;
   margin-bottom: 16px;
+}
+
+.inline-control-row {
+  width: min(100%, 680px);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.inline-control-row .sample-select {
+  flex: 1 1 260px;
+}
+
+.control-note {
+  color: #6b5847;
+  line-height: 1.5;
 }
 
 .control input,
@@ -89,6 +149,10 @@ button {
 
 .control-compact {
   max-width: 220px;
+}
+
+.sticky-controls .control {
+  margin-bottom: 0;
 }
 
 .sample-select {
@@ -102,7 +166,7 @@ button {
 
 .mml-legend {
   width: min(100%, 680px);
-  margin: -2px 0 14px;
+  margin: 0;
   display: flex;
   flex-wrap: wrap;
   gap: 10px 14px;
@@ -386,7 +450,7 @@ button {
 }
 
 .log {
-  margin: 0;
+  margin: 8px 0 0;
   padding: 16px;
   border-radius: 16px;
   background: #20150b;
@@ -412,6 +476,24 @@ code {
 
   .panel {
     padding: 20px;
+  }
+
+  .sticky-header {
+    top: 8px;
+    padding-bottom: 14px;
+  }
+
+  .sticky-controls {
+    gap: 12px;
+  }
+
+  .actions button {
+    width: 100%;
+  }
+
+  .control,
+  .control-compact {
+    max-width: 100%;
   }
 
   .mml-quick-fix-columns {

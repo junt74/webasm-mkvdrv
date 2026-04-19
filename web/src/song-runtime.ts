@@ -35,6 +35,8 @@ type NoiseChannelState = {
   envelopeActive: boolean;
 };
 
+type TerminalAction = "none" | "stop" | "wrap";
+
 export class MkvdrvSongRuntime {
   static readonly EVENT_NOTE_ON = 1;
   static readonly EVENT_NOTE_OFF = 2;
@@ -59,7 +61,11 @@ export class MkvdrvSongRuntime {
   private releaseRate = 0.0018;
   private bpm = 124;
   private ticksPerBeat = 96;
+  private loopCount = 0;
+  private loopsRemaining = 0;
+  private tailTicks = 0;
   private sequenceIndex = 0;
+  private pendingTerminalAction: TerminalAction = "none";
   private eventSamplesRemaining = 0;
   private samplesPerTick: number;
   private tickSamplesRemaining: number;
@@ -105,6 +111,9 @@ export class MkvdrvSongRuntime {
     this.mode = "sequence";
     this.bpm = payload.bpm;
     this.ticksPerBeat = payload.ticksPerBeat;
+    this.loopCount = payload.loopCount;
+    this.loopsRemaining = this.loopCount < 0 ? -1 : Math.max(0, this.loopCount);
+    this.tailTicks = payload.tailTicks;
     this.samplesPerTick = (60 / this.bpm / this.ticksPerBeat) * this.sampleRateValue;
     this.tickSamplesRemaining = this.samplesPerTick;
     this.sequenceEvents = new Uint32Array(payload.sequenceEvents);
@@ -114,10 +123,11 @@ export class MkvdrvSongRuntime {
     );
     this.sequenceIndex = 0;
     this.eventSamplesRemaining = 0;
+    this.pendingTerminalAction = "none";
     this.resetChannels();
     this.advanceSequenceEvent();
 
-    return `Sequence ready.\nTempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.eventStride}`;
+    return `Sequence ready.\nTempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.eventStride}, loop: ${this.loopCount}`;
   }
 
   stop(): void {
@@ -171,6 +181,16 @@ export class MkvdrvSongRuntime {
     for (let index = 0; index < left.length; index += 1) {
       if (this.mode === "sequence") {
         while (this.eventSamplesRemaining <= 0) {
+          if (this.pendingTerminalAction !== "none") {
+            this.resolvePendingTerminalAction();
+
+            if (this.mode !== "sequence" || this.eventSamplesRemaining > 0) {
+              break;
+            }
+
+            continue;
+          }
+
           this.advanceSequenceEvent();
 
           if (this.mode !== "sequence") {
@@ -482,10 +502,6 @@ export class MkvdrvSongRuntime {
     const noiseAmplitude = this.decodePsgAmplitude(noiseSettings.volume);
 
     if (eventKind === MkvdrvSongRuntime.EVENT_NOTE_ON) {
-      const eventSamples = Math.max(
-        1,
-        Math.round((60 / this.bpm / this.ticksPerBeat) * this.sampleRateValue * lengthTicks)
-      );
       if (channel < MkvdrvSongRuntime.PSG_TONE_CHANNELS) {
         this.setToneChannel(
           channel,
@@ -494,22 +510,15 @@ export class MkvdrvSongRuntime {
           true
         );
       }
-      this.eventSamplesRemaining = eventSamples;
     } else if (eventKind === MkvdrvSongRuntime.EVENT_NOTE_OFF) {
-      const eventSamples = Math.max(
-        1,
-        Math.round((60 / this.bpm / this.ticksPerBeat) * this.sampleRateValue * lengthTicks)
-      );
       if (channel < MkvdrvSongRuntime.PSG_TONE_CHANNELS) {
         this.setToneChannel(channel, 0, 0);
       } else if (channel === MkvdrvSongRuntime.PSG_NOISE_CHANNEL) {
         this.setNoiseChannel(0, 0);
       }
-      this.eventSamplesRemaining = eventSamples;
     } else if (eventKind === MkvdrvSongRuntime.EVENT_TEMPO) {
       this.bpm = value;
       this.samplesPerTick = (60 / this.bpm / this.ticksPerBeat) * this.sampleRateValue;
-      this.eventSamplesRemaining = 0;
     } else if (eventKind === MkvdrvSongRuntime.EVENT_VOLUME) {
       if (channel < MkvdrvSongRuntime.PSG_TONE_CHANNELS) {
         const toneChannel = this.toneChannels[channel];
@@ -522,7 +531,6 @@ export class MkvdrvSongRuntime {
         this.noiseChannel.mode = param;
         this.refreshNoiseTarget();
       }
-      this.eventSamplesRemaining = 0;
     } else if (eventKind === MkvdrvSongRuntime.EVENT_ENVELOPE_SELECT) {
       if (channel < MkvdrvSongRuntime.PSG_TONE_CHANNELS) {
         const toneChannel = this.toneChannels[channel];
@@ -540,33 +548,114 @@ export class MkvdrvSongRuntime {
           this.refreshNoiseTarget();
         }
       }
-      this.eventSamplesRemaining = 0;
     } else if (eventKind === MkvdrvSongRuntime.EVENT_NOISE_ON) {
-      const eventSamples = Math.max(
-        1,
-        Math.round((60 / this.bpm / this.ticksPerBeat) * this.sampleRateValue * lengthTicks)
-      );
       this.setNoiseChannel(
         value,
         noiseAmplitude || this.decodePsgAmplitude(8),
         noiseSettings.mode,
         true
       );
-      this.eventSamplesRemaining = eventSamples;
     } else if (eventKind === MkvdrvSongRuntime.EVENT_NOISE_OFF) {
-      const eventSamples = Math.max(
-        1,
-        Math.round((60 / this.bpm / this.ticksPerBeat) * this.sampleRateValue * lengthTicks)
-      );
       this.setNoiseChannel(0, 0);
-      this.eventSamplesRemaining = eventSamples;
     } else {
       this.silenceAllChannels();
-      this.eventSamplesRemaining = 0;
     }
 
-    this.sequenceIndex =
-      (this.sequenceIndex + 1) % (this.sequenceEvents.length / this.eventStride);
+    const eventCount = this.sequenceEvents.length / this.eventStride;
+    const nextSequenceIndex = this.sequenceIndex + 1;
+
+    if (nextSequenceIndex >= eventCount) {
+      const terminalDelaySamples = this.readTailDelaySamples();
+
+      if (this.loopsRemaining < 0) {
+        if (terminalDelaySamples > 0) {
+          this.pendingTerminalAction = "wrap";
+          this.eventSamplesRemaining = terminalDelaySamples;
+          return;
+        }
+
+        this.sequenceIndex = 0;
+        this.eventSamplesRemaining = this.readUpcomingEventDelaySamples();
+        return;
+      }
+
+      if (this.loopsRemaining > 0) {
+        this.loopsRemaining -= 1;
+        if (terminalDelaySamples > 0) {
+          this.pendingTerminalAction = "wrap";
+          this.eventSamplesRemaining = terminalDelaySamples;
+          return;
+        }
+
+        this.sequenceIndex = 0;
+        this.eventSamplesRemaining = this.readUpcomingEventDelaySamples();
+        return;
+      }
+
+      if (terminalDelaySamples > 0) {
+        this.pendingTerminalAction = "stop";
+        this.eventSamplesRemaining = terminalDelaySamples;
+        return;
+      }
+
+      this.sequenceIndex = eventCount;
+      this.eventSamplesRemaining = 0;
+      this.mode = "idle";
+      return;
+    }
+
+    this.sequenceIndex = nextSequenceIndex;
+    this.eventSamplesRemaining = this.readUpcomingEventDelaySamples();
+  }
+
+  private resolvePendingTerminalAction() {
+    const action = this.pendingTerminalAction;
+    this.pendingTerminalAction = "none";
+
+    if (action === "wrap") {
+      this.sequenceIndex = 0;
+      this.eventSamplesRemaining = this.readUpcomingEventDelaySamples();
+      return;
+    }
+
+    if (action === "stop") {
+      this.sequenceIndex = this.sequenceEvents.length / this.eventStride;
+      this.eventSamplesRemaining = 0;
+      this.mode = "idle";
+    }
+  }
+
+  private readUpcomingEventDelaySamples(): number {
+    if (this.sequenceEvents.length === 0) {
+      return 0;
+    }
+
+    const nextBase = this.sequenceIndex * this.eventStride;
+    const deltaTicks = this.sequenceEvents[nextBase + 2] ?? 0;
+
+    if (deltaTicks <= 0) {
+      return 0;
+    }
+
+    return Math.max(
+      1,
+      Math.round(
+        (60 / this.bpm / this.ticksPerBeat) * this.sampleRateValue * deltaTicks
+      )
+    );
+  }
+
+  private readTailDelaySamples(): number {
+    if (this.tailTicks <= 0) {
+      return 0;
+    }
+
+    return Math.max(
+      1,
+      Math.round(
+        (60 / this.bpm / this.ticksPerBeat) * this.sampleRateValue * this.tailTicks
+      )
+    );
   }
 
   private updateEnvelope(current: number, target: number): number {

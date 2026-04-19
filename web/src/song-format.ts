@@ -34,6 +34,8 @@ export type ExportedSong = {
   version: 1;
   engine: "an74689";
   ticksPerBeat: number;
+  loopCount: number;
+  tailTicks: number;
   channels: ExportedSongChannel[];
   envelopes: SequenceEnvelope[];
   events: ExportedSongEvent[];
@@ -42,6 +44,8 @@ export type ExportedSong = {
 export type SequencePayload = {
   bpm: number;
   ticksPerBeat: number;
+  loopCount: number;
+  tailTicks: number;
   sequenceEvents: Uint32Array;
   eventStride: number;
   envelopes: SequenceEnvelope[];
@@ -76,6 +80,8 @@ export const sequencePayloadFromSong = (song: ExportedSong): SequencePayload => 
   return {
     bpm: firstTempo?.value ?? 124,
     ticksPerBeat: song.ticksPerBeat,
+    loopCount: song.loopCount ?? 0,
+    tailTicks: song.tailTicks ?? 0,
     sequenceEvents: data,
     eventStride: SEQUENCE_EVENT_STRIDE,
     envelopes: song.envelopes

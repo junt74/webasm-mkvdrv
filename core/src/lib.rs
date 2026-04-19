@@ -5,10 +5,10 @@ use core::str;
 use serde::Serialize;
 
 use mml::{
-    collect_parse_diagnostics_with_context, format_parse_failure_with_context,
-    parse_failure_quick_fixes, parse_mml_with_context, EnvelopeDefinition, ParseFailure,
-    PSG_DEFAULT_VOLUME, PSG_NOISE_MODE_WHITE, SequenceEvent, EVENT_ENVELOPE_SELECT,
-    EVENT_NOISE_OFF, EVENT_NOISE_ON, EVENT_NOTE_OFF, EVENT_NOTE_ON, EVENT_TEMPO, EVENT_VOLUME,
+    EVENT_ENVELOPE_SELECT, EVENT_NOISE_OFF, EVENT_NOISE_ON, EVENT_NOTE_OFF, EVENT_NOTE_ON,
+    EVENT_TEMPO, EVENT_VOLUME, EnvelopeDefinition, PSG_DEFAULT_VOLUME, PSG_NOISE_MODE_WHITE,
+    ParseFailure, SequenceEvent, collect_parse_diagnostics_with_context,
+    format_parse_failure_with_context, parse_failure_quick_fixes, parse_mml_with_context,
 };
 
 const INIT_MESSAGE: &[u8] = b"MKVDRV-Wasm core initialized";
@@ -30,10 +30,10 @@ static mut NOTE_FREQUENCIES: [f32; NOTE_FREQUENCY_CAPACITY] = [0.0; NOTE_FREQUEN
 static mut SEQUENCE_EVENTS: [u32; SEQUENCE_EVENT_CAPACITY * SEQUENCE_EVENT_STRIDE] =
     [0; SEQUENCE_EVENT_CAPACITY * SEQUENCE_EVENT_STRIDE];
 static mut ENVELOPE_DEFINITION_COUNT: usize = 0;
-static mut ENVELOPE_DEFINITION_HEADERS: [u32; ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_HEADER_STRIDE] =
-    [0; ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_HEADER_STRIDE];
-static mut ENVELOPE_DEFINITION_VALUES: [u32; ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_VALUE_CAPACITY] =
-    [0; ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_VALUE_CAPACITY];
+static mut ENVELOPE_DEFINITION_HEADERS: [u32; ENVELOPE_DEFINITION_CAPACITY
+    * ENVELOPE_HEADER_STRIDE] = [0; ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_HEADER_STRIDE];
+static mut ENVELOPE_DEFINITION_VALUES: [u32; ENVELOPE_DEFINITION_CAPACITY
+    * ENVELOPE_VALUE_CAPACITY] = [0; ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_VALUE_CAPACITY];
 static mut EXPORTED_SONG_JSON: [u8; EXPORTED_SONG_JSON_CAPACITY] = [0; EXPORTED_SONG_JSON_CAPACITY];
 static mut EXPORTED_SONG_JSON_LEN: usize = 0;
 static mut MML_INPUT_BUFFER: [u8; MML_INPUT_CAPACITY] = [0; MML_INPUT_CAPACITY];
@@ -48,8 +48,10 @@ static mut LAST_PARSE_ERROR_MESSAGE: [u8; LAST_PARSE_ERROR_MESSAGE_CAPACITY] =
 static mut LAST_PARSE_ERROR_MESSAGE_LEN: usize = 0;
 static mut LAST_PARSE_ERROR_POSITION: usize = 0;
 static mut PARSE_DIAGNOSTIC_COUNT: usize = 0;
-static mut PARSE_DIAGNOSTIC_POSITIONS: [usize; PARSE_DIAGNOSTIC_CAPACITY] = [0; PARSE_DIAGNOSTIC_CAPACITY];
-static mut PARSE_DIAGNOSTIC_ENDS: [usize; PARSE_DIAGNOSTIC_CAPACITY] = [0; PARSE_DIAGNOSTIC_CAPACITY];
+static mut PARSE_DIAGNOSTIC_POSITIONS: [usize; PARSE_DIAGNOSTIC_CAPACITY] =
+    [0; PARSE_DIAGNOSTIC_CAPACITY];
+static mut PARSE_DIAGNOSTIC_ENDS: [usize; PARSE_DIAGNOSTIC_CAPACITY] =
+    [0; PARSE_DIAGNOSTIC_CAPACITY];
 static mut PARSE_DIAGNOSTIC_RELATED_POSITIONS: [usize; PARSE_DIAGNOSTIC_CAPACITY] =
     [usize::MAX; PARSE_DIAGNOSTIC_CAPACITY];
 static mut PARSE_DIAGNOSTIC_MESSAGE_LENS: [usize; PARSE_DIAGNOSTIC_CAPACITY] =
@@ -62,25 +64,24 @@ static mut PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_LENS: [usize;
 static mut PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_LENS: [usize;
     PARSE_DIAGNOSTIC_CAPACITY * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY] =
     [0; PARSE_DIAGNOSTIC_CAPACITY * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY];
-static mut PARSE_DIAGNOSTIC_MESSAGES: [u8; PARSE_DIAGNOSTIC_CAPACITY * PARSE_DIAGNOSTIC_MESSAGE_CAPACITY] =
+static mut PARSE_DIAGNOSTIC_MESSAGES: [u8; PARSE_DIAGNOSTIC_CAPACITY
+    * PARSE_DIAGNOSTIC_MESSAGE_CAPACITY] =
     [0; PARSE_DIAGNOSTIC_CAPACITY * PARSE_DIAGNOSTIC_MESSAGE_CAPACITY];
-static mut PARSE_DIAGNOSTIC_QUICK_FIX_LABELS: [u8;
-    PARSE_DIAGNOSTIC_CAPACITY
-        * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY
-        * PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_CAPACITY] =
-    [0;
-        PARSE_DIAGNOSTIC_CAPACITY
-            * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY
-            * PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_CAPACITY];
-static mut PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENTS: [u8;
-    PARSE_DIAGNOSTIC_CAPACITY
-        * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY
-        * PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY] =
-    [0;
-        PARSE_DIAGNOSTIC_CAPACITY
-            * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY
-            * PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY];
+static mut PARSE_DIAGNOSTIC_QUICK_FIX_LABELS: [u8; PARSE_DIAGNOSTIC_CAPACITY
+    * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY
+    * PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_CAPACITY] = [0; PARSE_DIAGNOSTIC_CAPACITY
+    * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY
+    * PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_CAPACITY];
+static mut PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENTS: [u8; PARSE_DIAGNOSTIC_CAPACITY
+    * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY
+    * PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY] = [0; PARSE_DIAGNOSTIC_CAPACITY
+    * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY
+    * PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY];
 static mut CONDITIONAL_BRANCH_INDEX: usize = 0;
+static mut LAST_SEQUENCE_TICKS_PER_BEAT: u32 = SEQUENCE_TICKS_PER_BEAT;
+static mut LAST_SEQUENCE_BPM: u32 = 124;
+static mut LAST_SEQUENCE_LOOP_COUNT: i32 = 0;
+static mut LAST_SEQUENCE_TAIL_TICKS: u32 = 0;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +90,8 @@ struct ExportedSong<'a> {
     version: u32,
     engine: &'a str,
     ticks_per_beat: u32,
+    loop_count: i32,
+    tail_ticks: u32,
     channels: Vec<ExportedSongChannel<'a>>,
     envelopes: Vec<ExportedSongEnvelope>,
     events: Vec<ExportedSongEvent<'a>>,
@@ -181,7 +184,22 @@ pub extern "C" fn mkvdrv_sequence_event_stride() -> usize {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn mkvdrv_sequence_ticks_per_beat() -> u32 {
-    SEQUENCE_TICKS_PER_BEAT
+    unsafe { LAST_SEQUENCE_TICKS_PER_BEAT }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_sequence_bpm() -> u32 {
+    unsafe { LAST_SEQUENCE_BPM }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_sequence_loop_count() -> i32 {
+    unsafe { LAST_SEQUENCE_LOOP_COUNT }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_sequence_tail_ticks() -> u32 {
+    unsafe { LAST_SEQUENCE_TAIL_TICKS }
 }
 
 #[unsafe(no_mangle)]
@@ -363,8 +381,14 @@ pub extern "C" fn mkvdrv_fill_demo_sequence() -> usize {
 fn fill_sequence_events_from_mml(source: &str) -> Result<usize, ParseFailure> {
     let branch_index = unsafe { CONDITIONAL_BRANCH_INDEX };
     let parsed = parse_mml_with_context(source, SEQUENCE_EVENT_CAPACITY, branch_index)?;
-    let playback_events = build_playback_events(&parsed.events);
+    let (playback_events, tail_ticks) = build_playback_events(&parsed.events);
     write_envelope_definitions(&parsed.envelopes);
+    store_sequence_metadata(
+        parsed.ticks_per_beat,
+        sequence_bpm_from_events(&parsed.events),
+        parsed.loop_count,
+        tail_ticks,
+    );
 
     for (index, event) in playback_events.iter().enumerate() {
         write_event(
@@ -384,9 +408,21 @@ fn fill_sequence_events_from_mml(source: &str) -> Result<usize, ParseFailure> {
 fn export_song_json_from_mml(source: &str) -> Result<usize, ParseFailure> {
     let branch_index = unsafe { CONDITIONAL_BRANCH_INDEX };
     let parsed = parse_mml_with_context(source, SEQUENCE_EVENT_CAPACITY, branch_index)?;
-    let playback_events = build_playback_events(&parsed.events);
+    let (playback_events, tail_ticks) = build_playback_events(&parsed.events);
     write_envelope_definitions(&parsed.envelopes);
-    write_exported_song_json(parsed.ticks_per_beat, &parsed.envelopes, &playback_events);
+    store_sequence_metadata(
+        parsed.ticks_per_beat,
+        sequence_bpm_from_events(&parsed.events),
+        parsed.loop_count,
+        tail_ticks,
+    );
+    write_exported_song_json(
+        parsed.ticks_per_beat,
+        parsed.loop_count,
+        tail_ticks,
+        &parsed.envelopes,
+        &playback_events,
+    );
     clear_parse_failure();
     Ok(unsafe { EXPORTED_SONG_JSON_LEN })
 }
@@ -481,7 +517,8 @@ fn fill_demo_sequence_events() -> usize {
         },
     ];
 
-    let playback_events = build_playback_events(&demo_events);
+    let (playback_events, tail_ticks) = build_playback_events(&demo_events);
+    store_sequence_metadata(SEQUENCE_TICKS_PER_BEAT, 132, 0, tail_ticks);
 
     for (index, event) in playback_events.iter().enumerate() {
         write_event(
@@ -502,8 +539,27 @@ fn encode_noise_param(volume: u32, noise_mode: u32) -> u32 {
     (noise_mode << 8) | volume.min(15)
 }
 
+fn store_sequence_metadata(ticks_per_beat: u32, bpm: u32, loop_count: i32, tail_ticks: u32) {
+    unsafe {
+        LAST_SEQUENCE_TICKS_PER_BEAT = ticks_per_beat;
+        LAST_SEQUENCE_BPM = bpm.max(1);
+        LAST_SEQUENCE_LOOP_COUNT = loop_count.max(-1);
+        LAST_SEQUENCE_TAIL_TICKS = tail_ticks;
+    }
+}
+
+fn sequence_bpm_from_events(events: &[SequenceEvent]) -> u32 {
+    events
+        .iter()
+        .find(|event| event.kind == EVENT_TEMPO)
+        .map(|event| event.value.max(1))
+        .unwrap_or(124)
+}
+
 fn write_exported_song_json(
     ticks_per_beat: u32,
+    loop_count: i32,
+    tail_ticks: u32,
     envelopes: &[EnvelopeDefinition],
     events: &[SequenceEvent],
 ) {
@@ -512,11 +568,25 @@ fn write_exported_song_json(
         version: 1,
         engine: "an74689",
         ticks_per_beat,
+        loop_count,
+        tail_ticks,
         channels: vec![
-            ExportedSongChannel { id: 0, role: "tone" },
-            ExportedSongChannel { id: 1, role: "tone" },
-            ExportedSongChannel { id: 2, role: "tone" },
-            ExportedSongChannel { id: 3, role: "noise" },
+            ExportedSongChannel {
+                id: 0,
+                role: "tone",
+            },
+            ExportedSongChannel {
+                id: 1,
+                role: "tone",
+            },
+            ExportedSongChannel {
+                id: 2,
+                role: "tone",
+            },
+            ExportedSongChannel {
+                id: 3,
+                role: "noise",
+            },
         ],
         envelopes: envelopes
             .iter()
@@ -609,7 +679,7 @@ fn clear_envelope_definitions() {
     }
 }
 
-fn build_playback_events(events: &[SequenceEvent]) -> Vec<SequenceEvent> {
+fn build_playback_events(events: &[SequenceEvent]) -> (Vec<SequenceEvent>, u32) {
     let mut channel_times = [0_u32; 4];
     let mut merged: Vec<(u32, u32, usize, SequenceEvent)> = Vec::with_capacity(events.len());
 
@@ -618,22 +688,29 @@ fn build_playback_events(events: &[SequenceEvent]) -> Vec<SequenceEvent> {
         let absolute_tick = channel_times[channel_index];
         let priority = event_priority(event.kind);
         merged.push((absolute_tick, priority, original_index, event));
-        channel_times[channel_index] = channel_times[channel_index].saturating_add(event.length_ticks);
+        channel_times[channel_index] =
+            channel_times[channel_index].saturating_add(event.length_ticks);
     }
 
     merged.sort_by_key(|(absolute_tick, priority, original_index, _)| {
         (*absolute_tick, *priority, *original_index)
     });
 
+    let total_ticks = channel_times.into_iter().max().unwrap_or(0);
+    let last_event_tick = merged.last().map(|(absolute_tick, _, _, _)| *absolute_tick).unwrap_or(0);
+    let tail_ticks = total_ticks.saturating_sub(last_event_tick);
+
     let mut previous_tick = 0_u32;
-    merged
+    let playback_events = merged
         .into_iter()
         .map(|(absolute_tick, _, _, mut event)| {
             event.length_ticks = absolute_tick.saturating_sub(previous_tick);
             previous_tick = absolute_tick;
             event
         })
-        .collect()
+        .collect();
+
+    (playback_events, tail_ticks)
 }
 
 fn event_priority(kind: u32) -> u32 {
@@ -745,8 +822,9 @@ fn store_parse_diagnostics(source: &str, diagnostics: &[ParseFailure], branch_in
             PARSE_DIAGNOSTIC_RELATED_POSITIONS[index] =
                 diagnostic.related_position.unwrap_or(usize::MAX);
             PARSE_DIAGNOSTIC_MESSAGE_LENS[index] = copy_len;
-            PARSE_DIAGNOSTIC_QUICK_FIX_COUNTS[index] =
-                quick_fixes.len().min(PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY);
+            PARSE_DIAGNOSTIC_QUICK_FIX_COUNTS[index] = quick_fixes
+                .len()
+                .min(PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY);
 
             for slot in start..end {
                 PARSE_DIAGNOSTIC_MESSAGES[slot] = 0;
@@ -787,7 +865,9 @@ fn store_parse_diagnostics(source: &str, diagnostics: &[ParseFailure], branch_in
                     flat_index * PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY;
                 let label_bytes = quick_fix.label.as_bytes();
                 let replacement_bytes = quick_fix.replacement.as_bytes();
-                let label_len = label_bytes.len().min(PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_CAPACITY);
+                let label_len = label_bytes
+                    .len()
+                    .min(PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_CAPACITY);
                 let replacement_len = replacement_bytes
                     .len()
                     .min(PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY);
@@ -911,10 +991,19 @@ mod tests {
         assert_eq!(unsafe { ENVELOPE_DEFINITION_HEADERS[0] }, 1);
         assert_eq!(unsafe { ENVELOPE_DEFINITION_HEADERS[1] }, 1);
         assert_eq!(unsafe { ENVELOPE_DEFINITION_VALUES[0] }, 0);
-        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE] }, EVENT_ENVELOPE_SELECT);
+        assert_eq!(
+            unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE] },
+            EVENT_ENVELOPE_SELECT
+        );
         assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE + 1] }, 1);
-        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2] }, EVENT_NOTE_ON);
-        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2 + 1] }, 36);
+        assert_eq!(
+            unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2] },
+            EVENT_NOTE_ON
+        );
+        assert_eq!(
+            unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2 + 1] },
+            36
+        );
         assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2 + 3] }, 0);
         assert_eq!(
             unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2 + 4] },
@@ -925,7 +1014,7 @@ mod tests {
     #[test]
     fn exports_song_json_from_buffer() {
         let _guard = lock_test_state();
-        let input = b"@E1={1,0,4,8}\nA @E1 t150 o4 l8 c r d";
+        let input = b"L3\n@E1={1,0,4,8}\nA @E1 t150 o4 l8 c r d";
 
         unsafe {
             MML_INPUT_BUFFER[..input.len()].copy_from_slice(input);
@@ -940,6 +1029,7 @@ mod tests {
 
         assert!(json.contains("\"format\": \"mkvdrv-song\""));
         assert!(json.contains("\"engine\": \"an74689\""));
+        assert!(json.contains("\"loopCount\": 3"));
         assert!(json.contains("\"kind\": \"envelopeSelect\""));
         assert!(json.contains("\"envelopes\""));
     }
@@ -959,7 +1049,9 @@ mod tests {
         assert_eq!(mkvdrv_last_parse_error_position(), 3);
 
         let message = unsafe {
-            str::from_utf8_unchecked(&LAST_PARSE_ERROR_MESSAGE[..mkvdrv_last_parse_error_message_len()])
+            str::from_utf8_unchecked(
+                &LAST_PARSE_ERROR_MESSAGE[..mkvdrv_last_parse_error_message_len()],
+            )
         };
         assert!(message.contains("missing parameter for 'C'"));
         assert!(message.contains("ticks-per-whole expects a number"));
@@ -980,8 +1072,8 @@ mod tests {
         let second_replacement_start = PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY;
         let second_replacement = unsafe {
             str::from_utf8_unchecked(
-                &PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENTS[second_replacement_start
-                    ..second_replacement_start + second_replacement_len],
+                &PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENTS
+                    [second_replacement_start..second_replacement_start + second_replacement_len],
             )
         };
 
@@ -1004,7 +1096,10 @@ mod tests {
         let event_count = mkvdrv_parse_mml_from_buffer(input.len());
 
         assert_eq!(event_count, 4);
-        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2 + 1] }, 40);
+        assert_eq!(
+            unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2 + 1] },
+            40
+        );
 
         mkvdrv_set_conditional_branch_index(0);
     }
@@ -1027,9 +1122,8 @@ mod tests {
         assert_eq!(unsafe { PARSE_DIAGNOSTIC_RELATED_POSITIONS[1] }, 7);
 
         let first_len = unsafe { PARSE_DIAGNOSTIC_MESSAGE_LENS[0] };
-        let first_message = unsafe {
-            str::from_utf8_unchecked(&PARSE_DIAGNOSTIC_MESSAGES[..first_len])
-        };
+        let first_message =
+            unsafe { str::from_utf8_unchecked(&PARSE_DIAGNOSTIC_MESSAGES[..first_len]) };
         assert!(first_message.contains("found loop close without a matching '['"));
     }
 

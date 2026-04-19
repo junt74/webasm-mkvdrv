@@ -9,6 +9,7 @@ const DEFAULT_QUANTIZE_NUMERATOR: u32 = 8;
 const DEFAULT_QUANTIZE_DENOMINATOR: u32 = 8;
 const PSG_CHANNEL_COUNT: usize = 4;
 const PSG_NOISE_CHANNEL: u32 = 3;
+const PRESET_ENVELOPE_ID_BASE: u32 = 0x8000;
 
 pub const EVENT_NOTE_ON: u32 = 1;
 pub const EVENT_NOTE_OFF: u32 = 2;
@@ -35,6 +36,7 @@ pub struct SequenceEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedSequence {
     pub ticks_per_beat: u32,
+    pub loop_count: i32,
     pub events: Vec<SequenceEvent>,
     pub envelopes: Vec<EnvelopeDefinition>,
 }
@@ -58,6 +60,7 @@ pub enum ParseError {
     InvalidNoiseMode,
     InvalidEnvelopeDefinition,
     InvalidEnvelopeSelection,
+    InvalidLoopCount,
     InvalidTie,
     InvalidSlur,
     InvalidReverseRest,
@@ -83,6 +86,7 @@ impl fmt::Display for ParseError {
             Self::InvalidNoiseMode => write!(f, "invalid noise mode"),
             Self::InvalidEnvelopeDefinition => write!(f, "invalid envelope definition"),
             Self::InvalidEnvelopeSelection => write!(f, "invalid envelope selection"),
+            Self::InvalidLoopCount => write!(f, "invalid loop count"),
             Self::InvalidTie => write!(f, "invalid '^' target"),
             Self::InvalidSlur => write!(f, "invalid '&' target"),
             Self::InvalidReverseRest => write!(f, "invalid reverse-rest target"),
@@ -192,7 +196,8 @@ pub fn format_parse_failure_with_context(
         details.push(related_hint);
     }
 
-    if let Some(context) = nesting_context_hint(source, failure.position, conditional_branch_index) {
+    if let Some(context) = nesting_context_hint(source, failure.position, conditional_branch_index)
+    {
         details.push(context);
     }
 
@@ -217,6 +222,7 @@ pub fn parse_mml_with_context(
     parser.parse_bytes(source.as_bytes(), 0)?;
     Ok(ParsedSequence {
         ticks_per_beat: parser.ticks_per_beat,
+        loop_count: parser.loop_count,
         events: parser.events,
         envelopes: parser.envelope_definitions,
     })
@@ -231,14 +237,11 @@ pub fn collect_parse_diagnostics_with_context(
 
     if let Err(error) = parse_mml_with_context(source, max_events, conditional_branch_index) {
         let error = attach_context_related_position(source, error);
-        if !diagnostics
-            .iter()
-            .any(|entry| {
-                entry.position == error.position
-                    && entry.error == error.error
-                    && entry.related_position == error.related_position
-            })
-        {
+        if !diagnostics.iter().any(|entry| {
+            entry.position == error.position
+                && entry.error == error.error
+                && entry.related_position == error.related_position
+        }) {
             diagnostics.push(error);
         }
     }
@@ -256,27 +259,59 @@ fn unsupported_command_hint(error: &ParseError) -> Option<String> {
         return None;
     }
 
-    if "cdefgabrtlovwCQqR".contains(*character) {
+    if "cdefgabrtlovwCQqRSL".contains(*character) {
         return None;
     }
 
     let suggestion = match character {
-        'v' => "reference spec defines v<num> as coarse volume; Stage 1 alternative is to keep pitch/rhythm only until VOL is implemented",
-        'V' => "reference spec defines V<num> or V+<num>/V-<num> as fine volume; Stage 1 alternative is to omit it and keep the phrase structure",
-        'p' => "reference spec defines p<num> as pan; Stage 1 has no stereo control yet, so remove p<num> and verify the melody first",
-        'k' => "reference spec notes k<num> is currently handled like _<num>; Stage 1 alternative is to rewrite it as _<num> once transpose is added",
-        'K' => "reference spec defines K<num> as detune; Stage 1 has no detune yet, so keep the note sequence and drop K<num> for now",
-        'E' => "reference spec defines E<num> as volume envelope; Stage 1 alternative is to use q or Q for rough articulation only",
-        'M' => "reference spec defines M<num> as pitch envelope; Stage 1 alternative is to spell the pitch motion as explicit notes",
-        'P' => "reference spec defines P<num> as pan envelope; Stage 1 has no pan lane yet, so omit it for now",
-        'G' => "reference spec defines G<num> as portamento; Stage 1 alternative is to approximate it with short connecting notes or ~",
-        'D' => "reference spec defines D<num> as drum mode; Stage 1 has no drum-note remap yet, so keep explicit note names only",
-        'T' => "reference spec defines T<num> as platform tempo; Stage 1 alternative is to use t<num> BPM tempo",
-        'L' => "reference spec defines L as segno; Stage 1 alternative is to expand the repeated section with [] where possible",
-        'n' => "direct note-number style is not implemented in this parser; Stage 1 alternative is to rewrite it with o<num> and cdefgab",
-        's' => "reference state rules define s<ticks> as shuffle; Stage 1 alternative is to rewrite timing with explicit :ticks lengths",
-        'x' => "this looks like a custom or extended command; compare it against _reference/mml_spec/commands.md and keep to Stage 1 core commands first",
-        _ => "compare this command against _reference/mml_spec/commands.md; supported Stage 1 core commands are t l o C Q q R and notes cdefgab/r",
+        'v' => {
+            "reference spec defines v<num> as coarse volume; Stage 1 alternative is to keep pitch/rhythm only until VOL is implemented"
+        }
+        'V' => {
+            "reference spec defines V<num> or V+<num>/V-<num> as fine volume; Stage 1 alternative is to omit it and keep the phrase structure"
+        }
+        'p' => {
+            "reference spec defines p<num> as pan; Stage 1 has no stereo control yet, so remove p<num> and verify the melody first"
+        }
+        'k' => {
+            "reference spec notes k<num> is currently handled like _<num>; Stage 1 alternative is to rewrite it as _<num> once transpose is added"
+        }
+        'K' => {
+            "reference spec defines K<num> as detune; Stage 1 has no detune yet, so keep the note sequence and drop K<num> for now"
+        }
+        'E' => {
+            "reference spec defines E<num> as volume envelope; Stage 1 alternative is to use q or Q for rough articulation only"
+        }
+        'M' => {
+            "reference spec defines M<num> as pitch envelope; Stage 1 alternative is to spell the pitch motion as explicit notes"
+        }
+        'P' => {
+            "reference spec defines P<num> as pan envelope; Stage 1 has no pan lane yet, so omit it for now"
+        }
+        'G' => {
+            "reference spec defines G<num> as portamento; Stage 1 alternative is to approximate it with short connecting notes or ~"
+        }
+        'D' => {
+            "reference spec defines D<num> as drum mode; Stage 1 has no drum-note remap yet, so keep explicit note names only"
+        }
+        'T' => {
+            "reference spec defines T<num> as platform tempo; Stage 1 alternative is to use t<num> BPM tempo"
+        }
+        'L' => {
+            "reference spec defines L as segno; Stage 1 alternative is to expand the repeated section with [] where possible"
+        }
+        'n' => {
+            "direct note-number style is not implemented in this parser; Stage 1 alternative is to rewrite it with o<num> and cdefgab"
+        }
+        's' => {
+            "reference state rules define s<ticks> as shuffle; Stage 1 alternative is to rewrite timing with explicit :ticks lengths"
+        }
+        'x' => {
+            "this looks like a custom or extended command; compare it against _reference/mml_spec/commands.md and keep to Stage 1 core commands first"
+        }
+        _ => {
+            "compare this command against _reference/mml_spec/commands.md; supported Stage 1 core commands are t l o C Q q R and notes cdefgab/r"
+        }
     };
     let example = unsupported_command_example_hint(*character);
 
@@ -349,7 +384,10 @@ fn unsupported_command_quick_fixes(character: char) -> Vec<QuickFixSuggestion> {
 
     if let Some((label, replacement)) = alternative {
         let replacement = replacement.to_string();
-        if !suggestions.iter().any(|entry| entry.replacement == replacement) {
+        if !suggestions
+            .iter()
+            .any(|entry| entry.replacement == replacement)
+        {
             suggestions.push(QuickFixSuggestion {
                 label: label.to_string(),
                 replacement,
@@ -552,7 +590,9 @@ fn scan_nesting_context(source: &str, position: usize) -> NestingContext {
     }
 
     let innermost_opener = match (loop_stack.last(), conditional_stack.last()) {
-        (Some(loop_position), Some(conditional_position)) => Some((*loop_position).max(*conditional_position)),
+        (Some(loop_position), Some(conditional_position)) => {
+            Some((*loop_position).max(*conditional_position))
+        }
         (Some(loop_position), None) => Some(*loop_position),
         (None, Some(conditional_position)) => Some(*conditional_position),
         (None, None) => None,
@@ -577,6 +617,7 @@ fn attach_context_related_position(source: &str, mut failure: ParseFailure) -> P
 struct Parser {
     max_events: usize,
     ticks_per_beat: u32,
+    loop_count: i32,
     tempo_bpm: u32,
     conditional_branch_index: usize,
     active_channels: Vec<u32>,
@@ -590,6 +631,7 @@ impl Parser {
         Self {
             max_events,
             ticks_per_beat: DEFAULT_TICKS_PER_BEAT,
+            loop_count: 0,
             tempo_bpm: DEFAULT_TEMPO_BPM,
             conditional_branch_index,
             active_channels: vec![PSG_DEFAULT_CHANNEL],
@@ -669,6 +711,15 @@ impl Parser {
                         state.ticks_per_whole = ticks;
                     });
                 }
+                b'L' => {
+                    index += 1;
+                    let loop_count = read_required_signed_number(bytes, &mut index, 'L')
+                        .map_err(|error| ParseFailure::at(position, error))?;
+                    if loop_count < -1 {
+                        return Err(ParseFailure::at(position, ParseError::InvalidLoopCount));
+                    }
+                    self.loop_count = loop_count;
+                }
                 b'o' => {
                     index += 1;
                     let octave = read_required_number(bytes, &mut index, 'o')
@@ -729,6 +780,13 @@ impl Parser {
                         }
                     }
                 }
+                b'S' => {
+                    index += 1;
+                    let preset = read_required_number(bytes, &mut index, 'S')
+                        .map_err(|error| ParseFailure::at(position, error))?;
+                    self.select_preset_envelope(preset)
+                        .map_err(|error| ParseFailure::at(position, error))?;
+                }
                 b'Q' => {
                     index += 1;
                     let mut quantize = self
@@ -760,12 +818,13 @@ impl Parser {
                 b'c' | b'd' | b'e' | b'f' | b'g' | b'a' | b'b' => {
                     let channels = self.active_channels.clone();
                     index += 1;
+                    let accidental = read_note_accidental(bytes, &mut index);
                     let duration = self
                         .read_duration(bytes, &mut index)
                         .map_err(|error| ParseFailure::at(position, error))?;
 
                     for channel in channels {
-                        let note = self.read_note_number(byte, channel);
+                        let note = self.read_note_number(byte, accidental, channel);
                         let (on_ticks, off_ticks) = self.articulate_duration(duration, channel);
                         if channel == PSG_NOISE_CHANNEL {
                             let noise_frequency = noise_frequency_from_note_number(note);
@@ -842,11 +901,12 @@ impl Parser {
                             ));
                         }
                     };
+                    let accidental = read_note_accidental(bytes, &mut index);
                     let duration = self
                         .read_duration(bytes, &mut index)
                         .map_err(|error| ParseFailure::at(position, error))?;
                     for channel in channels {
-                        let note = self.read_note_number(note_byte, channel);
+                        let note = self.read_note_number(note_byte, accidental, channel);
                         self.reverse_previous_timed_event(duration, position, channel)?;
                         let (on_ticks, off_ticks) = self.articulate_duration(duration, channel);
                         if channel == PSG_NOISE_CHANNEL {
@@ -899,10 +959,8 @@ impl Parser {
                 }
                 b'[' => {
                     index += 1;
-                    let sections =
-                        split_loop_sections(bytes, index, base_offset).map_err(|error| {
-                            ParseFailure::at(position, error)
-                        })?;
+                    let sections = split_loop_sections(bytes, index, base_offset)
+                        .map_err(|error| ParseFailure::at(position, error))?;
                     index = sections.next_index;
 
                     for iteration in 0..sections.repeat_count {
@@ -916,10 +974,8 @@ impl Parser {
                 }
                 b'{' => {
                     index += 1;
-                    let sections =
-                        split_conditional_sections(bytes, index, base_offset).map_err(|error| {
-                            ParseFailure::at(position, error)
-                        })?;
+                    let sections = split_conditional_sections(bytes, index, base_offset)
+                        .map_err(|error| ParseFailure::at(position, error))?;
                     index = sections.next_index;
                     let selected = self
                         .conditional_branch_index
@@ -935,7 +991,6 @@ impl Parser {
                     ));
                 }
             }
-
         }
 
         Ok(())
@@ -963,17 +1018,13 @@ impl Parser {
         }
     }
 
-    fn parse_at_command(
-        &mut self,
-        bytes: &[u8],
-        index: &mut usize,
-    ) -> Result<(), ParseError> {
+    fn parse_at_command(&mut self, bytes: &[u8], index: &mut usize) -> Result<(), ParseError> {
         match peek(bytes, *index) {
             Some(b'E') => {
                 *index += 1;
                 skip_spaces_inline(bytes, index);
-                let envelope_id =
-                    read_required_number(bytes, index, 'E').map_err(|_| ParseError::InvalidEnvelopeSelection)?;
+                let envelope_id = read_required_number(bytes, index, 'E')
+                    .map_err(|_| ParseError::InvalidEnvelopeSelection)?;
                 skip_spaces_inline(bytes, index);
 
                 if matches!(peek(bytes, *index), Some(b'=')) {
@@ -985,20 +1036,37 @@ impl Parser {
 
                 for channel in self.active_channels.clone() {
                     self.track_state_mut(channel).envelope_id = envelope_id;
-                    self.push_event_with_meta(
-                        EVENT_ENVELOPE_SELECT,
-                        envelope_id,
-                        0,
-                        channel,
-                        0,
-                    )
-                    .map_err(|_| ParseError::TooManyEvents)?;
+                    self.push_event_with_meta(EVENT_ENVELOPE_SELECT, envelope_id, 0, channel, 0)
+                        .map_err(|_| ParseError::TooManyEvents)?;
                 }
                 Ok(())
             }
             Some(other) => Err(ParseError::UnexpectedCharacter(other as char)),
             None => Err(ParseError::UnexpectedCharacter('\0')),
         }
+    }
+
+    fn select_preset_envelope(&mut self, preset: u32) -> Result<(), ParseError> {
+        if preset == 0 {
+            self.apply_envelope_selection(0)?;
+            return Ok(());
+        }
+
+        let Some(definition) = preset_envelope_definition(preset) else {
+            return Err(ParseError::InvalidEnvelopeSelection);
+        };
+
+        self.store_envelope_definition(definition.clone());
+        self.apply_envelope_selection(definition.id)
+    }
+
+    fn apply_envelope_selection(&mut self, envelope_id: u32) -> Result<(), ParseError> {
+        for channel in self.active_channels.clone() {
+            self.track_state_mut(channel).envelope_id = envelope_id;
+            self.push_event_with_meta(EVENT_ENVELOPE_SELECT, envelope_id, 0, channel, 0)
+                .map_err(|_| ParseError::TooManyEvents)?;
+        }
+        Ok(())
     }
 
     fn parse_envelope_definition(
@@ -1022,8 +1090,8 @@ impl Parser {
                     break;
                 }
                 Some(byte) if byte.is_ascii_digit() => {
-                    let value =
-                        read_unsigned_number(bytes, index).ok_or(ParseError::InvalidEnvelopeDefinition)?;
+                    let value = read_unsigned_number(bytes, index)
+                        .ok_or(ParseError::InvalidEnvelopeDefinition)?;
                     items.push(value);
                 }
                 Some(_) | None => return Err(ParseError::InvalidEnvelopeDefinition),
@@ -1079,12 +1147,7 @@ impl Parser {
     }
 
     #[allow(dead_code)]
-    fn push_event(
-        &mut self,
-        kind: u32,
-        value: u32,
-        length_ticks: u32,
-    ) -> Result<(), ParseFailure> {
+    fn push_event(&mut self, kind: u32, value: u32, length_ticks: u32) -> Result<(), ParseFailure> {
         self.push_event_with_meta(kind, value, length_ticks, PSG_DEFAULT_CHANNEL, 0)
     }
 
@@ -1110,7 +1173,7 @@ impl Parser {
         Ok(())
     }
 
-    fn read_note_number(&self, byte: u8, channel: u32) -> u32 {
+    fn read_note_number(&self, byte: u8, accidental: i32, channel: u32) -> u32 {
         let base = match byte {
             b'c' => 0,
             b'd' => 2,
@@ -1122,7 +1185,7 @@ impl Parser {
             _ => 0,
         };
 
-        (self.track_state(channel).octave * 12 + base) as u32
+        (self.track_state(channel).octave * 12 + base + accidental).max(0) as u32
     }
 
     fn read_duration(&self, bytes: &[u8], index: &mut usize) -> Result<u32, ParseError> {
@@ -1289,6 +1352,32 @@ impl Parser {
     }
 }
 
+fn preset_envelope_id(preset: u32) -> u32 {
+    PRESET_ENVELOPE_ID_BASE + preset
+}
+
+fn preset_envelope_definition(preset: u32) -> Option<EnvelopeDefinition> {
+    let (speed, values, loop_start) = match preset {
+        1 => (1, vec![0], None),
+        2 => (1, vec![4], None),
+        3 => (1, vec![12, 8, 4, 0], None),
+        4 => (2, vec![14, 12, 10, 8, 6, 4, 2, 0], None),
+        5 => (1, vec![0, 4, 8, 12, 15], None),
+        6 => (2, vec![0, 2, 4, 6, 8, 10, 12, 14, 15], None),
+        7 => (1, vec![0, 3, 6, 8, 8, 8, 8], None),
+        8 => (1, vec![0, 8, 0], None),
+        9 => (1, vec![0, 10, 4, 0], None),
+        _ => return None,
+    };
+
+    Some(EnvelopeDefinition {
+        id: preset_envelope_id(preset),
+        speed,
+        values,
+        loop_start,
+    })
+}
+
 fn parse_track_selector(bytes: &[u8], index: usize) -> Option<(Vec<u32>, usize)> {
     let mut cursor = index;
     let mut channels = Vec::new();
@@ -1318,6 +1407,16 @@ fn parse_track_selector(bytes: &[u8], index: usize) -> Option<(Vec<u32>, usize)>
         }
         Some(b'\n') | Some(b'\r') | None => Some((channels, cursor)),
         _ => None,
+    }
+}
+
+fn read_note_accidental(bytes: &[u8], index: &mut usize) -> i32 {
+    match peek(bytes, *index) {
+        Some(b'+') => {
+            *index += 1;
+            1
+        }
+        _ => 0,
     }
 }
 
@@ -1354,12 +1453,29 @@ fn skip_spaces_and_commas(bytes: &[u8], index: &mut usize) {
     }
 }
 
-fn read_required_number(
+fn read_required_number(bytes: &[u8], index: &mut usize, command: char) -> Result<u32, ParseError> {
+    read_unsigned_number(bytes, index).ok_or(ParseError::MissingParameter(command))
+}
+
+fn read_required_signed_number(
     bytes: &[u8],
     index: &mut usize,
     command: char,
-) -> Result<u32, ParseError> {
-    read_unsigned_number(bytes, index).ok_or(ParseError::MissingParameter(command))
+) -> Result<i32, ParseError> {
+    let sign = match peek(bytes, *index) {
+        Some(b'-') => {
+            *index += 1;
+            -1
+        }
+        Some(b'+') => {
+            *index += 1;
+            1
+        }
+        _ => 1,
+    };
+
+    let value = read_unsigned_number(bytes, index).ok_or(ParseError::MissingParameter(command))?;
+    Ok((value as i32) * sign)
 }
 
 fn read_unsigned_number(bytes: &[u8], index: &mut usize) -> Option<u32> {
@@ -1376,11 +1492,7 @@ fn read_unsigned_number(bytes: &[u8], index: &mut usize) -> Option<u32> {
         *index += 1;
     }
 
-    if *index == start {
-        None
-    } else {
-        Some(value)
-    }
+    if *index == start { None } else { Some(value) }
 }
 
 struct LoopSections<'a> {
@@ -1413,10 +1525,7 @@ fn split_loop_sections<'a>(
                 if loop_depth == 0 {
                     let body_end = body_end.unwrap_or(index);
                     let break_section = break_start.map(|section_start| {
-                        (
-                            &bytes[section_start..index],
-                            base_offset + section_start,
-                        )
+                        (&bytes[section_start..index], base_offset + section_start)
                     });
                     index += 1;
                     let repeat_count = read_unsigned_number(bytes, &mut index).unwrap_or(2);
@@ -1504,13 +1613,19 @@ fn scan_structural_diagnostics(source: &str) -> Vec<ParseFailure> {
             b'[' => loop_stack.push(index),
             b']' => {
                 if loop_stack.pop().is_none() {
-                    diagnostics.push(ParseFailure::at(index, ParseError::UnexpectedCharacter(']')));
+                    diagnostics.push(ParseFailure::at(
+                        index,
+                        ParseError::UnexpectedCharacter(']'),
+                    ));
                 }
             }
             b'{' => conditional_stack.push(index),
             b'}' => {
                 if conditional_stack.pop().is_none() {
-                    diagnostics.push(ParseFailure::at(index, ParseError::UnexpectedCharacter('}')));
+                    diagnostics.push(ParseFailure::at(
+                        index,
+                        ParseError::UnexpectedCharacter('}'),
+                    ));
                 }
             }
             _ => {}
@@ -1519,24 +1634,12 @@ fn scan_structural_diagnostics(source: &str) -> Vec<ParseFailure> {
         index += 1;
     }
 
-    diagnostics.extend(
-        loop_stack
-            .into_iter()
-            .map(|position| ParseFailure::with_related_position(
-                position,
-                ParseError::UnterminatedLoop,
-                position,
-            )),
-    );
-    diagnostics.extend(
-        conditional_stack
-            .into_iter()
-            .map(|position| ParseFailure::with_related_position(
-                position,
-                ParseError::UnterminatedConditional,
-                position,
-            )),
-    );
+    diagnostics.extend(loop_stack.into_iter().map(|position| {
+        ParseFailure::with_related_position(position, ParseError::UnterminatedLoop, position)
+    }));
+    diagnostics.extend(conditional_stack.into_iter().map(|position| {
+        ParseFailure::with_related_position(position, ParseError::UnterminatedConditional, position)
+    }));
 
     diagnostics
 }
@@ -1596,6 +1699,44 @@ mod tests {
     }
 
     #[test]
+    fn parses_global_loop_count() {
+        let no_loop = parse_mml("L0 t124 o4 c", 64).expect("parse ok");
+        let finite = parse_mml("L3 t124 o4 c", 64).expect("parse ok");
+        let infinite = parse_mml("L-1 t124 o4 c", 64).expect("parse ok");
+
+        assert_eq!(no_loop.loop_count, 0);
+        assert_eq!(finite.loop_count, 3);
+        assert_eq!(infinite.loop_count, -1);
+    }
+
+    #[test]
+    fn rejects_invalid_global_loop_count() {
+        let error = parse_mml("L-2 t124 o4 c", 64).expect_err("parse error");
+
+        assert_eq!(error.error, ParseError::InvalidLoopCount);
+        assert_eq!(error.position, 0);
+    }
+
+    #[test]
+    fn parses_sharp_with_plus() {
+        let parsed = parse_mml("t124 o6 l16 c+ d f+ a+", 64).expect("parse ok");
+
+        assert_eq!(parsed.events[1], note_on(61, 6));
+        assert_eq!(parsed.events[3], note_on(62, 6));
+        assert_eq!(parsed.events[5], note_on(66, 6));
+        assert_eq!(parsed.events[7], note_on(70, 6));
+    }
+
+    #[test]
+    fn parses_grace_note_with_plus() {
+        let parsed = parse_mml("o4 l8 c~c+:3", 16).expect("parse ok");
+
+        assert_eq!(parsed.events[2].kind, EVENT_NOTE_ON);
+        assert_eq!(parsed.events[2].value, 37);
+        assert_eq!(parsed.events[2].length_ticks, 3);
+    }
+
+    #[test]
     fn parses_line_based_tone_channels() {
         let parsed = parse_mml("A o4 l8 c\nB o3 l8 g\nC o2 l8 c", 64).expect("parse ok");
 
@@ -1615,7 +1756,10 @@ mod tests {
         assert_eq!(parsed.events[0].kind, EVENT_NOISE_ON);
         assert_eq!(parsed.events[0].channel, 3);
         assert!(parsed.events[0].value > 0);
-        assert_eq!(parsed.events[0].param, encode_noise_param(PSG_DEFAULT_VOLUME, PSG_NOISE_MODE_WHITE));
+        assert_eq!(
+            parsed.events[0].param,
+            encode_noise_param(PSG_DEFAULT_VOLUME, PSG_NOISE_MODE_WHITE)
+        );
         assert_eq!(parsed.events[1].kind, EVENT_NOISE_OFF);
         assert_eq!(parsed.events[1].channel, 3);
         assert_eq!(parsed.events[1].value, parsed.events[0].value);
@@ -1665,6 +1809,40 @@ mod tests {
         assert_eq!(parsed.events[0].channel, 0);
         assert_eq!(parsed.events[1].kind, EVENT_VOLUME);
         assert_eq!(parsed.events[2].kind, EVENT_NOTE_ON);
+    }
+
+    #[test]
+    fn parses_s_preset_envelope_selection() {
+        let parsed = parse_mml("A S3 v12 c", 64).expect("parse ok");
+
+        assert_eq!(parsed.envelopes.len(), 1);
+        assert_eq!(parsed.envelopes[0].id, preset_envelope_id(3));
+        assert_eq!(parsed.envelopes[0].speed, 1);
+        assert_eq!(parsed.envelopes[0].values, vec![12, 8, 4, 0]);
+
+        assert_eq!(parsed.events[0].kind, EVENT_ENVELOPE_SELECT);
+        assert_eq!(parsed.events[0].value, preset_envelope_id(3));
+        assert_eq!(parsed.events[0].channel, 0);
+        assert_eq!(parsed.events[1].kind, EVENT_VOLUME);
+        assert_eq!(parsed.events[2].kind, EVENT_NOTE_ON);
+    }
+
+    #[test]
+    fn s0_clears_selected_envelope() {
+        let parsed = parse_mml("A @E1 S0 c", 64).expect("parse ok");
+
+        assert_eq!(parsed.events[0].kind, EVENT_ENVELOPE_SELECT);
+        assert_eq!(parsed.events[0].value, 1);
+        assert_eq!(parsed.events[1].kind, EVENT_ENVELOPE_SELECT);
+        assert_eq!(parsed.events[1].value, 0);
+    }
+
+    #[test]
+    fn rejects_invalid_s_preset_selection() {
+        let error = parse_mml("A S99 c", 64).expect_err("parse error");
+
+        assert_eq!(error.error, ParseError::InvalidEnvelopeSelection);
+        assert_eq!(error.position, 2);
     }
 
     #[test]
@@ -1869,7 +2047,11 @@ mod tests {
 
         assert!(!fixes.is_empty());
         assert!(fixes[0].label.contains("最小"));
-        assert!(fixes.iter().any(|entry| entry.replacement == "o4 l8 c d e f"));
+        assert!(
+            fixes
+                .iter()
+                .any(|entry| entry.replacement == "o4 l8 c d e f")
+        );
     }
 
     #[test]

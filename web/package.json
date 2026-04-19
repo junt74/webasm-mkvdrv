@@ -8,7 +8,7 @@
     "predev": "npm run build:wasm",
     "dev": "vite",
     "prebuild:engine": "npm run build:wasm",
-    "build:engine": "vite build --config vite.engine.config.ts",
+    "build:engine": "vite build --config vite.engine.config.ts && esbuild src/processor.ts --bundle --outfile=dist-engine/mkvdrv-processor.worklet.js --format=iife --platform=neutral --target=es2022",
     "prebuild": "npm run build:wasm",
     "build": "vite build",
     "preview": "vite preview",
@@ -17,6 +17,7 @@
   },
   "dependencies": {},
   "devDependencies": {
+    "esbuild": "^0.25.0",
     "typescript": "^5.9.3",
     "vite": "^7.1.12"
   }

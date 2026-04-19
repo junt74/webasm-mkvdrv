@@ -15,99 +15,118 @@ if (!app) {
 app.innerHTML = `
   <main class="layout">
     <section class="panel hero">
-      <p class="eyebrow">Stage 1 Sequencing</p>
-      <h1>MKVDRV-Wasm</h1>
-      <p class="lead">
-        Rust/Wasm で波形テーブルとノート周波数テーブルを生成し、AudioWorklet 側で単音再生と簡易シーケンスを処理する最小構成です。
-      </p>
-      <div class="actions">
-        <button id="start-button" type="button">Start Tone</button>
-        <button id="sequence-button" type="button">Start Demo</button>
-        <button id="mml-button" type="button">Play MML</button>
-        <button id="export-button" type="button">Export Song JSON</button>
-        <button id="stop-button" type="button">Stop</button>
-      </div>
-      <label class="control">
-        <span>Frequency</span>
-        <input id="frequency" type="range" min="110" max="880" step="1" value="440" />
-        <strong id="frequency-value">440 Hz</strong>
-      </label>
-      <label class="control">
-        <span>Tempo</span>
-        <input id="tempo" type="range" min="80" max="180" step="1" value="124" />
-        <strong id="tempo-value">124 BPM</strong>
-      </label>
-      <label class="control control-compact">
-        <span>Branch Select</span>
-        <input id="branch-index" type="number" min="0" max="31" step="1" value="0" />
-        <strong id="branch-index-value">branch 0</strong>
-      </label>
-      <label class="control control-compact">
-        <span>Sound Engine</span>
-        <select id="render-engine" class="sample-select">
-          <option value="an74689">AN74689 PSG</option>
-          <option value="sine">Sine Test</option>
-        </select>
-      </label>
-      <label class="control">
-        <span>MML Sample</span>
-        <select id="mml-sample" class="sample-select">
-          <option value="arp">Arpeggio Demo</option>
-          <option value="scale">Scale Walk</option>
-          <option value="channels">Channel Split</option>
-          <option value="noise">Noise Mode</option>
-          <option value="envelope">Envelope Shape</option>
-          <option value="articulation">Articulation Check</option>
-          <option value="branch">Branch Selection</option>
-          <option value="error">Error Example</option>
-        </select>
-      </label>
-      <label class="control">
-        <span>MML Input</span>
-        <div class="mml-editor-shell">
-          <pre id="mml-overlay" class="mml-overlay" aria-hidden="true"></pre>
-          <textarea id="mml-input" class="mml-editor" spellcheck="false">t124 o4 l16 ceg>c<g e c r dfa>b<a f d r</textarea>
+      <div class="sticky-header">
+        <p class="eyebrow">Stage 1 Sequencing</p>
+        <h1>MKVDRV-Wasm</h1>
+        <p class="lead">
+          Rust/Wasm で波形テーブルとノート周波数テーブルを生成し、AudioWorklet 側で単音再生と簡易シーケンスを処理する最小構成です。
+        </p>
+        <div class="actions">
+          <button id="start-button" type="button">Start Tone</button>
+          <button id="sequence-button" type="button">Start Demo</button>
+          <button id="mml-button" type="button">Play MML</button>
+          <button id="export-button" type="button">Export Song JSON</button>
+          <button id="stop-button" type="button">Stop</button>
         </div>
-      </label>
-      <div class="mml-legend" aria-label="MML token legend">
-        <span class="mml-legend-item"><i class="mml-legend-chip mml-token-note"></i>Note</span>
-        <span class="mml-legend-item"><i class="mml-legend-chip mml-token-command"></i>Command</span>
-        <span class="mml-legend-item"><i class="mml-legend-chip mml-token-number"></i>Number</span>
-        <span class="mml-legend-item"><i class="mml-legend-chip mml-token-operator"></i>Operator</span>
-        <span class="mml-legend-item"><i class="mml-legend-chip mml-token-bracket"></i>Bracket</span>
-        <span class="mml-legend-item"><i class="mml-legend-chip mml-token-comment"></i>Comment</span>
-      </div>
-      <div id="mml-error" class="mml-error" hidden>
-        <strong>MML Error</strong>
-        <p id="mml-error-summary" class="mml-error-summary"></p>
-        <div id="mml-error-actions" class="mml-error-actions"></div>
-        <div id="mml-quick-fix-preview" class="mml-quick-fix-preview" hidden>
-          <strong>Quick Fix Preview</strong>
-          <p id="mml-quick-fix-label" class="mml-quick-fix-label"></p>
-          <p id="mml-quick-fix-meta" class="mml-quick-fix-meta"></p>
-          <div id="mml-quick-fix-options" class="mml-quick-fix-options"></div>
-          <div class="mml-quick-fix-columns">
-            <div class="mml-quick-fix-card">
-              <span class="mml-quick-fix-heading">Before</span>
-              <pre id="mml-quick-fix-before" class="mml-quick-fix-code"></pre>
+        <div class="sticky-controls">
+          <label class="control control-compact">
+            <span>Branch Select</span>
+            <input id="branch-index" type="number" min="0" max="31" step="1" value="0" />
+            <strong id="branch-index-value">branch 0</strong>
+          </label>
+          <label class="control control-compact">
+            <span>Sound Engine</span>
+            <select id="render-engine" class="sample-select">
+              <option value="an74689">AN74689 PSG</option>
+              <option value="sine">Sine Test</option>
+            </select>
+          </label>
+          <label class="control">
+            <span>MML Sample</span>
+            <select id="mml-sample" class="sample-select">
+              <option value="arp">Arpeggio Demo</option>
+              <option value="scale">Scale Walk</option>
+              <option value="channels">Channel Split</option>
+              <option value="noise">Noise Mode</option>
+              <option value="envelope">Envelope Shape</option>
+              <option value="articulation">Articulation Check</option>
+              <option value="branch">Branch Selection</option>
+              <option value="error">Error Example</option>
+            </select>
+          </label>
+          <div class="control">
+            <span>Envelope Shortcut</span>
+            <div class="inline-control-row">
+              <select id="envelope-shortcut" class="sample-select">
+                <option value="">Off</option>
+                <option value="S1">S1 Gate Full</option>
+                <option value="S2">S2 Gate Soft</option>
+                <option value="S3">S3 Attack Fast</option>
+                <option value="S4">S4 Attack Slow</option>
+                <option value="S5">S5 Decay Short</option>
+                <option value="S6">S6 Decay Long</option>
+                <option value="S7">S7 Decay Hold</option>
+                <option value="S8">S8 Dip Return Fast</option>
+                <option value="S9">S9 Dip Return Wide</option>
+              </select>
+              <button id="insert-envelope-shortcut" class="secondary-button" type="button">
+                Insert
+              </button>
             </div>
-            <div class="mml-quick-fix-card">
-              <span class="mml-quick-fix-heading">After</span>
-              <pre id="mml-quick-fix-after" class="mml-quick-fix-code"></pre>
-            </div>
-          </div>
-          <div class="mml-quick-fix-actions">
-            <button id="mml-quick-fix-apply" class="mml-error-jump" type="button">
-              プレビュー内容を適用
-            </button>
-            <button id="mml-quick-fix-cancel" class="mml-error-jump" type="button">
-              キャンセル
-            </button>
+            <small class="control-note">
+              選択した S コマンドをカーソル位置へ挿入します。細かい調整はそのまま MML 側で編集できます。
+            </small>
           </div>
         </div>
-        <pre id="mml-error-context" class="mml-error-context"></pre>
       </div>
-      <pre id="log-output" class="log">Booting MKVDRV-Wasm...</pre>
+      <div class="editor-area">
+        <label class="control">
+          <span>MML Input</span>
+          <div class="mml-editor-shell">
+            <pre id="mml-overlay" class="mml-overlay" aria-hidden="true"></pre>
+            <textarea id="mml-input" class="mml-editor" spellcheck="false">t124 o4 l16 ceg>c<g e c r dfa>b<a f d r</textarea>
+          </div>
+        </label>
+        <div class="mml-legend" aria-label="MML token legend">
+          <span class="mml-legend-item"><i class="mml-legend-chip mml-token-note"></i>Note</span>
+          <span class="mml-legend-item"><i class="mml-legend-chip mml-token-command"></i>Command</span>
+          <span class="mml-legend-item"><i class="mml-legend-chip mml-token-number"></i>Number</span>
+          <span class="mml-legend-item"><i class="mml-legend-chip mml-token-operator"></i>Operator</span>
+          <span class="mml-legend-item"><i class="mml-legend-chip mml-token-bracket"></i>Bracket</span>
+          <span class="mml-legend-item"><i class="mml-legend-chip mml-token-comment"></i>Comment</span>
+        </div>
+        <div id="mml-error" class="mml-error" hidden>
+          <strong>MML Error</strong>
+          <p id="mml-error-summary" class="mml-error-summary"></p>
+          <div id="mml-error-actions" class="mml-error-actions"></div>
+          <div id="mml-quick-fix-preview" class="mml-quick-fix-preview" hidden>
+            <strong>Quick Fix Preview</strong>
+            <p id="mml-quick-fix-label" class="mml-quick-fix-label"></p>
+            <p id="mml-quick-fix-meta" class="mml-quick-fix-meta"></p>
+            <div id="mml-quick-fix-options" class="mml-quick-fix-options"></div>
+            <div class="mml-quick-fix-columns">
+              <div class="mml-quick-fix-card">
+                <span class="mml-quick-fix-heading">Before</span>
+                <pre id="mml-quick-fix-before" class="mml-quick-fix-code"></pre>
+              </div>
+              <div class="mml-quick-fix-card">
+                <span class="mml-quick-fix-heading">After</span>
+                <pre id="mml-quick-fix-after" class="mml-quick-fix-code"></pre>
+              </div>
+            </div>
+            <div class="mml-quick-fix-actions">
+              <button id="mml-quick-fix-apply" class="mml-error-jump" type="button">
+                プレビュー内容を適用
+              </button>
+              <button id="mml-quick-fix-cancel" class="mml-error-jump" type="button">
+                キャンセル
+              </button>
+            </div>
+          </div>
+          <pre id="mml-error-context" class="mml-error-context"></pre>
+        </div>
+        <pre id="log-output" class="log">Booting MKVDRV-Wasm...</pre>
+      </div>
     </section>
 
     <section class="panel">
@@ -132,6 +151,9 @@ type MkvdrvWasmExports = {
   mkvdrv_sequence_events_ptr: () => number;
   mkvdrv_sequence_event_stride: () => number;
   mkvdrv_sequence_ticks_per_beat: () => number;
+  mkvdrv_sequence_bpm: () => number;
+  mkvdrv_sequence_loop_count: () => number;
+  mkvdrv_sequence_tail_ticks: () => number;
   mkvdrv_envelope_definition_count: () => number;
   mkvdrv_envelope_definition_headers_ptr: () => number;
   mkvdrv_envelope_definition_values_ptr: () => number;
@@ -174,6 +196,9 @@ type WasmRuntime = {
   sequenceEvents: Uint32Array;
   sequenceEventStride: number;
   sequenceTicksPerBeat: number;
+  sequenceBpm: number;
+  sequenceLoopCount: number;
+  sequenceTailTicks: number;
   envelopes: SequenceEnvelope[];
 };
 
@@ -259,10 +284,6 @@ const mmlButton = document.querySelector<HTMLButtonElement>("#mml-button");
 const exportButton =
   document.querySelector<HTMLButtonElement>("#export-button");
 const stopButton = document.querySelector<HTMLButtonElement>("#stop-button");
-const frequencyInput = document.querySelector<HTMLInputElement>("#frequency");
-const frequencyValue = document.querySelector<HTMLElement>("#frequency-value");
-const tempoInput = document.querySelector<HTMLInputElement>("#tempo");
-const tempoValue = document.querySelector<HTMLElement>("#tempo-value");
 const branchIndexInput =
   document.querySelector<HTMLInputElement>("#branch-index");
 const branchIndexValue =
@@ -270,6 +291,11 @@ const branchIndexValue =
 const renderEngineSelect =
   document.querySelector<HTMLSelectElement>("#render-engine");
 const sampleSelect = document.querySelector<HTMLSelectElement>("#mml-sample");
+const envelopeShortcutSelect = document.querySelector<HTMLSelectElement>(
+  "#envelope-shortcut"
+);
+const insertEnvelopeShortcutButton =
+  document.querySelector<HTMLButtonElement>("#insert-envelope-shortcut");
 const mmlOverlay = document.querySelector<HTMLElement>("#mml-overlay");
 const mmlEditorShell =
   document.querySelector<HTMLDivElement>(".mml-editor-shell");
@@ -427,6 +453,9 @@ const loadRuntime = async (): Promise<WasmRuntime> => {
       );
       const sequenceEvents = new Uint32Array(eventSource);
       const sequenceTicksPerBeat = exports.mkvdrv_sequence_ticks_per_beat();
+      const sequenceBpm = exports.mkvdrv_sequence_bpm();
+      const sequenceLoopCount = exports.mkvdrv_sequence_loop_count();
+      const sequenceTailTicks = exports.mkvdrv_sequence_tail_ticks();
       const envelopes = readEnvelopeDefinitions({
         exports,
         message,
@@ -435,6 +464,9 @@ const loadRuntime = async (): Promise<WasmRuntime> => {
         sequenceEvents,
         sequenceEventStride: eventStride,
         sequenceTicksPerBeat,
+        sequenceBpm,
+        sequenceLoopCount,
+        sequenceTailTicks,
         envelopes: []
       });
 
@@ -446,6 +478,9 @@ const loadRuntime = async (): Promise<WasmRuntime> => {
         sequenceEvents,
         sequenceEventStride: eventStride,
         sequenceTicksPerBeat,
+        sequenceBpm,
+        sequenceLoopCount,
+        sequenceTailTicks,
         envelopes
       };
     })();
@@ -454,23 +489,7 @@ const loadRuntime = async (): Promise<WasmRuntime> => {
   return runtimePromise;
 };
 
-const currentFrequency = (): number =>
-  Number.parseFloat(frequencyInput?.value ?? "440");
-
-const currentTempo = (): number =>
-  Number.parseFloat(tempoInput?.value ?? "124");
-
-const updateFrequencyLabel = () => {
-  if (frequencyValue) {
-    frequencyValue.textContent = `${currentFrequency().toFixed(0)} Hz`;
-  }
-};
-
-const updateTempoLabel = () => {
-  if (tempoValue) {
-    tempoValue.textContent = `${currentTempo().toFixed(0)} BPM`;
-  }
-};
+const PREVIEW_FREQUENCY = 440;
 
 const currentBranchIndex = (): number => {
   const rawValue = Number.parseInt(branchIndexInput?.value ?? "0", 10);
@@ -972,6 +991,34 @@ const selectTextRange = (source: string, start: number, end: number) => {
   renderMmlOverlay();
 };
 
+const insertTextAtCursor = (text: string) => {
+  if (!mmlInput || text.length === 0) {
+    return;
+  }
+
+  const source = mmlInput.value;
+  const selectionStart = mmlInput.selectionStart ?? source.length;
+  const selectionEnd = mmlInput.selectionEnd ?? selectionStart;
+  const needsTrailingSpace =
+    selectionStart < source.length &&
+    !/\s/.test(source.charAt(selectionStart)) &&
+    !/\s$/.test(text);
+  const insertedText = needsTrailingSpace ? `${text} ` : text;
+  const nextValue =
+    source.slice(0, selectionStart) +
+    insertedText +
+    source.slice(selectionEnd);
+  const caret = selectionStart + insertedText.length;
+
+  mmlInput.value = nextValue;
+  clearMmlError();
+  mmlInput.focus();
+  mmlInput.setSelectionRange(caret, caret);
+  updateActiveLineRange();
+  updateSampleSelection(nextValue);
+  renderMmlOverlay();
+};
+
 const applyQuickFix = (diagnostic: MmlDiagnostic, candidateIndex: number) => {
   const candidate = diagnostic.quickFixes[candidateIndex];
   if (!mmlInput || !candidate) {
@@ -1111,7 +1158,14 @@ const readExportedSongJson = (runtime: WasmRuntime): string => {
 const parseMmlText = (
   runtime: WasmRuntime,
   source: string
-): { sequenceEvents: Uint32Array; envelopes: SequenceEnvelope[] } => {
+): {
+  sequenceEvents: Uint32Array;
+  envelopes: SequenceEnvelope[];
+  bpm: number;
+  ticksPerBeat: number;
+  loopCount: number;
+  tailTicks: number;
+} => {
   const encoder = new TextEncoder();
   const encoded = encoder.encode(source);
   const capacity = runtime.exports.mkvdrv_mml_input_buffer_capacity();
@@ -1167,7 +1221,11 @@ const parseMmlText = (
 
   return {
     sequenceEvents: readSequenceEvents(runtime, eventCount),
-    envelopes: readEnvelopeDefinitions(runtime)
+    envelopes: readEnvelopeDefinitions(runtime),
+    bpm: runtime.exports.mkvdrv_sequence_bpm(),
+    ticksPerBeat: runtime.exports.mkvdrv_sequence_ticks_per_beat(),
+    loopCount: runtime.exports.mkvdrv_sequence_loop_count(),
+    tailTicks: runtime.exports.mkvdrv_sequence_tail_ticks()
   };
 };
 
@@ -1243,7 +1301,7 @@ const configureNode = (
     type: "configure",
     renderEngine: currentRenderEngine(),
     wavetable: runtime.wavetable,
-    frequency: currentFrequency(),
+    frequency: PREVIEW_FREQUENCY,
     noteFrequencies: runtime.noteFrequencies
   });
 };
@@ -1264,8 +1322,6 @@ const downloadTextFile = (
 
 const boot = async () => {
   try {
-    updateFrequencyLabel();
-    updateTempoLabel();
     updateBranchLabel();
     applySample(selectedSampleKey());
     updateActiveLineRange();
@@ -1295,7 +1351,7 @@ startButton?.addEventListener("click", async () => {
     node.port.postMessage({ type: "startTone" });
 
     updateLog(
-      `${runtime.message}\nSound engine: ${currentRenderEngine()}\nTone playback started at ${currentFrequency().toFixed(0)} Hz`
+      `${runtime.message}\nSound engine: ${currentRenderEngine()}\nTone playback started at ${PREVIEW_FREQUENCY.toFixed(0)} Hz`
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -1313,15 +1369,17 @@ sequenceButton?.addEventListener("click", async () => {
     configureNode(node, runtime);
     node.port.postMessage({
       type: "startSequence",
-      bpm: currentTempo(),
+      bpm: runtime.sequenceBpm,
       ticksPerBeat: runtime.sequenceTicksPerBeat,
+      loopCount: runtime.sequenceLoopCount,
+      tailTicks: runtime.sequenceTailTicks,
       sequenceEvents: runtime.sequenceEvents,
       eventStride: runtime.sequenceEventStride,
       envelopes: runtime.envelopes
     });
 
     updateLog(
-      `${runtime.message}\nSound engine: ${currentRenderEngine()}\nRust demo sequence started at ${currentTempo().toFixed(0)} BPM`
+      `${runtime.message}\nSound engine: ${currentRenderEngine()}\nRust demo sequence started at ${runtime.sequenceBpm.toFixed(0)} BPM\nLoop count: ${runtime.sequenceLoopCount}\nTail ticks: ${runtime.sequenceTailTicks}`
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -1338,19 +1396,24 @@ mmlButton?.addEventListener("click", async () => {
 
     configureNode(node, runtime);
     const source = mmlInput?.value ?? "";
-    const { sequenceEvents, envelopes } = parseMmlText(runtime, source);
+    const { sequenceEvents, envelopes, bpm, ticksPerBeat, loopCount, tailTicks } = parseMmlText(
+      runtime,
+      source
+    );
 
     node.port.postMessage({
       type: "startSequence",
-      bpm: currentTempo(),
-      ticksPerBeat: runtime.sequenceTicksPerBeat,
+      bpm,
+      ticksPerBeat,
+      loopCount,
+      tailTicks,
       sequenceEvents,
       eventStride: runtime.sequenceEventStride,
       envelopes
     });
 
     updateLog(
-      `${runtime.message}\nSound engine: ${currentRenderEngine()}\nParsed MML events: ${sequenceEvents.length / runtime.sequenceEventStride}\nEnvelope defs: ${envelopes.length}\nPlayback started from MML input.`
+      `${runtime.message}\nSound engine: ${currentRenderEngine()}\nParsed MML events: ${sequenceEvents.length / runtime.sequenceEventStride}\nTempo: ${bpm} BPM\nTicks/Beat: ${ticksPerBeat}\nLoop count: ${loopCount}\nTail ticks: ${tailTicks}\nEnvelope defs: ${envelopes.length}\nPlayback started from MML input.`
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -1384,24 +1447,6 @@ stopButton?.addEventListener("click", async () => {
   workletNode.port.postMessage({ type: "stop" });
   await audioContext?.suspend();
   updateLog("Playback stopped.");
-});
-
-frequencyInput?.addEventListener("input", () => {
-  updateFrequencyLabel();
-
-  workletNode?.port.postMessage({
-    type: "setFrequency",
-    frequency: currentFrequency()
-  });
-});
-
-tempoInput?.addEventListener("input", () => {
-  updateTempoLabel();
-
-  workletNode?.port.postMessage({
-    type: "setTempo",
-    bpm: currentTempo()
-  });
 });
 
 branchIndexInput?.addEventListener("input", () => {
@@ -1459,6 +1504,17 @@ mmlInput?.addEventListener("select", () => {
 
 sampleSelect?.addEventListener("change", () => {
   applySample(selectedSampleKey());
+});
+
+insertEnvelopeShortcutButton?.addEventListener("click", () => {
+  const shortcut = envelopeShortcutSelect?.value ?? "";
+  if (!shortcut) {
+    updateLog("Envelope Shortcut is Off. Select S1-S9 to insert a preset.");
+    return;
+  }
+
+  insertTextAtCursor(`${shortcut} `);
+  updateLog(`Inserted envelope shortcut: ${shortcut}`);
 });
 
 void boot();

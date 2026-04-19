@@ -1,4 +1,3 @@
-import processorUrl from "./processor.ts?url";
 import type { ExportedSong, RenderEngine } from "./song-format";
 import { sequencePayloadFromSong } from "./song-format";
 
@@ -13,6 +12,13 @@ type WorkletConfigureMessage = {
 type WorkletStartSequenceMessage = ReturnType<typeof sequencePayloadFromSong> & {
   type: "startSequence";
 };
+
+/** Emitted next to this bundle by `build:engine` (esbuild of `processor.ts`). */
+const processorModuleHref = new URL(
+  /* @vite-ignore */
+  "./mkvdrv-processor.worklet.js",
+  import.meta.url
+).href;
 
 export class MkvdrvGameAudioEngine {
   private audioContext?: AudioContext;
@@ -36,7 +42,7 @@ export class MkvdrvGameAudioEngine {
   async initialize(): Promise<void> {
     if (!this.audioContext) {
       this.audioContext = new AudioContext();
-      await this.audioContext.audioWorklet.addModule(processorUrl);
+      await this.audioContext.audioWorklet.addModule(processorModuleHref);
     }
 
     if (!this.workletNode) {

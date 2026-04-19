@@ -80,6 +80,8 @@ class MkvdrvProcessor extends AudioWorkletProcessor {
           this.runtime.loadSequence({
             bpm: message.bpm,
             ticksPerBeat: message.ticksPerBeat,
+            loopCount: message.loopCount,
+            tailTicks: message.tailTicks,
             sequenceEvents: message.sequenceEvents,
             eventStride: message.eventStride,
             envelopes: message.envelopes as SequenceEnvelope[]
