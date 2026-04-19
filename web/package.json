@@ -7,6 +7,8 @@
     "build:wasm": "../scripts/build-wasm.sh",
     "predev": "npm run build:wasm",
     "dev": "vite",
+    "prebuild:engine": "npm run build:wasm",
+    "build:engine": "vite build --config vite.engine.config.ts",
     "prebuild": "npm run build:wasm",
     "build": "vite build",
     "preview": "vite preview",

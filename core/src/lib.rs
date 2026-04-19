@@ -2,6 +2,7 @@ mod mml;
 
 use core::f32::consts::TAU;
 use core::str;
+use serde::Serialize;
 
 use mml::{
     collect_parse_diagnostics_with_context, format_parse_failure_with_context,
@@ -18,6 +19,7 @@ const SEQUENCE_EVENT_CAPACITY: usize = 128;
 const ENVELOPE_DEFINITION_CAPACITY: usize = 16;
 const ENVELOPE_VALUE_CAPACITY: usize = 32;
 const ENVELOPE_HEADER_STRIDE: usize = 4;
+const EXPORTED_SONG_JSON_CAPACITY: usize = 32 * 1024;
 const SEQUENCE_TICKS_PER_BEAT: u32 = 24;
 const MML_INPUT_CAPACITY: usize = 4096;
 const A4_INDEX: i32 = 69;
@@ -32,6 +34,8 @@ static mut ENVELOPE_DEFINITION_HEADERS: [u32; ENVELOPE_DEFINITION_CAPACITY * ENV
     [0; ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_HEADER_STRIDE];
 static mut ENVELOPE_DEFINITION_VALUES: [u32; ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_VALUE_CAPACITY] =
     [0; ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_VALUE_CAPACITY];
+static mut EXPORTED_SONG_JSON: [u8; EXPORTED_SONG_JSON_CAPACITY] = [0; EXPORTED_SONG_JSON_CAPACITY];
+static mut EXPORTED_SONG_JSON_LEN: usize = 0;
 static mut MML_INPUT_BUFFER: [u8; MML_INPUT_CAPACITY] = [0; MML_INPUT_CAPACITY];
 const LAST_PARSE_ERROR_MESSAGE_CAPACITY: usize = 256;
 const PARSE_DIAGNOSTIC_CAPACITY: usize = 16;
@@ -77,6 +81,44 @@ static mut PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENTS: [u8;
             * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY
             * PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY];
 static mut CONDITIONAL_BRANCH_INDEX: usize = 0;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportedSong<'a> {
+    format: &'a str,
+    version: u32,
+    engine: &'a str,
+    ticks_per_beat: u32,
+    channels: Vec<ExportedSongChannel<'a>>,
+    envelopes: Vec<ExportedSongEnvelope>,
+    events: Vec<ExportedSongEvent<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportedSongChannel<'a> {
+    id: u32,
+    role: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportedSongEnvelope {
+    id: u32,
+    speed: u32,
+    values: Vec<u32>,
+    loop_start: Option<u32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportedSongEvent<'a> {
+    delta_ticks: u32,
+    kind: &'a str,
+    channel: u32,
+    value: u32,
+    param: u32,
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn mkvdrv_init_message_ptr() -> *const u8 {
@@ -165,6 +207,16 @@ pub extern "C" fn mkvdrv_envelope_definition_header_stride() -> usize {
 #[unsafe(no_mangle)]
 pub extern "C" fn mkvdrv_envelope_definition_value_stride() -> usize {
     ENVELOPE_VALUE_CAPACITY
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_exported_song_json_ptr() -> *const u8 {
+    core::ptr::addr_of!(EXPORTED_SONG_JSON).cast::<u8>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_exported_song_json_len() -> usize {
+    unsafe { EXPORTED_SONG_JSON_LEN }
 }
 
 #[unsafe(no_mangle)]
@@ -284,6 +336,19 @@ pub extern "C" fn mkvdrv_parse_mml_from_buffer(input_len: usize) -> usize {
     let len = input_len.min(MML_INPUT_CAPACITY);
     let source = unsafe { str::from_utf8_unchecked(&MML_INPUT_BUFFER[..len]) };
     fill_sequence_events_from_mml(source).unwrap_or_else(|error| {
+        clear_exported_song_json();
+        clear_envelope_definitions();
+        store_parse_failures(source, &error);
+        0
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_export_song_json_from_buffer(input_len: usize) -> usize {
+    let len = input_len.min(MML_INPUT_CAPACITY);
+    let source = unsafe { str::from_utf8_unchecked(&MML_INPUT_BUFFER[..len]) };
+    export_song_json_from_mml(source).unwrap_or_else(|error| {
+        clear_exported_song_json();
         clear_envelope_definitions();
         store_parse_failures(source, &error);
         0
@@ -316,7 +381,18 @@ fn fill_sequence_events_from_mml(source: &str) -> Result<usize, ParseFailure> {
     Ok(playback_events.len())
 }
 
+fn export_song_json_from_mml(source: &str) -> Result<usize, ParseFailure> {
+    let branch_index = unsafe { CONDITIONAL_BRANCH_INDEX };
+    let parsed = parse_mml_with_context(source, SEQUENCE_EVENT_CAPACITY, branch_index)?;
+    let playback_events = build_playback_events(&parsed.events);
+    write_envelope_definitions(&parsed.envelopes);
+    write_exported_song_json(parsed.ticks_per_beat, &parsed.envelopes, &playback_events);
+    clear_parse_failure();
+    Ok(unsafe { EXPORTED_SONG_JSON_LEN })
+}
+
 fn fill_demo_sequence_events() -> usize {
+    clear_exported_song_json();
     clear_envelope_definitions();
     let demo_events = [
         SequenceEvent {
@@ -426,6 +502,66 @@ fn encode_noise_param(volume: u32, noise_mode: u32) -> u32 {
     (noise_mode << 8) | volume.min(15)
 }
 
+fn write_exported_song_json(
+    ticks_per_beat: u32,
+    envelopes: &[EnvelopeDefinition],
+    events: &[SequenceEvent],
+) {
+    let song = ExportedSong {
+        format: "mkvdrv-song",
+        version: 1,
+        engine: "an74689",
+        ticks_per_beat,
+        channels: vec![
+            ExportedSongChannel { id: 0, role: "tone" },
+            ExportedSongChannel { id: 1, role: "tone" },
+            ExportedSongChannel { id: 2, role: "tone" },
+            ExportedSongChannel { id: 3, role: "noise" },
+        ],
+        envelopes: envelopes
+            .iter()
+            .map(|entry| ExportedSongEnvelope {
+                id: entry.id,
+                speed: entry.speed,
+                values: entry.values.clone(),
+                loop_start: entry.loop_start,
+            })
+            .collect(),
+        events: events
+            .iter()
+            .map(|event| ExportedSongEvent {
+                delta_ticks: event.length_ticks,
+                kind: event_kind_name(event.kind),
+                channel: event.channel,
+                value: event.value,
+                param: event.param,
+            })
+            .collect(),
+    };
+
+    let json = serde_json::to_string_pretty(&song).unwrap_or_else(|_| "{}".to_string());
+    write_exported_song_json_bytes(json.as_bytes());
+}
+
+fn write_exported_song_json_bytes(bytes: &[u8]) {
+    clear_exported_song_json();
+    let len = bytes.len().min(EXPORTED_SONG_JSON_CAPACITY);
+
+    unsafe {
+        EXPORTED_SONG_JSON_LEN = len;
+        EXPORTED_SONG_JSON[..len].copy_from_slice(&bytes[..len]);
+    }
+}
+
+fn clear_exported_song_json() {
+    unsafe {
+        EXPORTED_SONG_JSON_LEN = 0;
+        for slot in 0..EXPORTED_SONG_JSON_CAPACITY {
+            EXPORTED_SONG_JSON[slot] = 0;
+        }
+    }
+}
+
 fn write_envelope_definitions(definitions: &[EnvelopeDefinition]) {
     clear_envelope_definitions();
     let count = definitions.len().min(ENVELOPE_DEFINITION_CAPACITY);
@@ -508,6 +644,19 @@ fn event_priority(kind: u32) -> u32 {
         EVENT_NOTE_OFF | EVENT_NOISE_OFF => 3,
         EVENT_NOTE_ON | EVENT_NOISE_ON => 4,
         _ => 4,
+    }
+}
+
+fn event_kind_name(kind: u32) -> &'static str {
+    match kind {
+        EVENT_NOTE_ON => "noteOn",
+        EVENT_NOTE_OFF => "noteOff",
+        EVENT_TEMPO => "tempo",
+        EVENT_VOLUME => "volume",
+        EVENT_NOISE_ON => "noiseOn",
+        EVENT_NOISE_OFF => "noiseOff",
+        EVENT_ENVELOPE_SELECT => "envelopeSelect",
+        _ => "unknown",
     }
 }
 
@@ -771,6 +920,28 @@ mod tests {
             unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2 + 4] },
             PSG_DEFAULT_VOLUME
         );
+    }
+
+    #[test]
+    fn exports_song_json_from_buffer() {
+        let _guard = lock_test_state();
+        let input = b"@E1={1,0,4,8}\nA @E1 t150 o4 l8 c r d";
+
+        unsafe {
+            MML_INPUT_BUFFER[..input.len()].copy_from_slice(input);
+        }
+
+        let json_len = mkvdrv_export_song_json_from_buffer(input.len());
+        assert!(json_len > 0);
+
+        let json = unsafe {
+            str::from_utf8_unchecked(&EXPORTED_SONG_JSON[..mkvdrv_exported_song_json_len()])
+        };
+
+        assert!(json.contains("\"format\": \"mkvdrv-song\""));
+        assert!(json.contains("\"engine\": \"an74689\""));
+        assert!(json.contains("\"kind\": \"envelopeSelect\""));
+        assert!(json.contains("\"envelopes\""));
     }
 
     #[test]

@@ -1,5 +1,10 @@
 import "./style.css";
 import processorUrl from "./processor.ts?url";
+import type {
+  ExportedSong,
+  RenderEngine,
+  SequenceEnvelope
+} from "./song-format";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 
@@ -19,6 +24,7 @@ app.innerHTML = `
         <button id="start-button" type="button">Start Tone</button>
         <button id="sequence-button" type="button">Start Demo</button>
         <button id="mml-button" type="button">Play MML</button>
+        <button id="export-button" type="button">Export Song JSON</button>
         <button id="stop-button" type="button">Stop</button>
       </div>
       <label class="control">
@@ -155,15 +161,9 @@ type MkvdrvWasmExports = {
   mkvdrv_parse_diagnostic_quick_fix_label_stride: () => number;
   mkvdrv_parse_diagnostic_quick_fix_replacement_stride: () => number;
   mkvdrv_parse_mml_from_buffer: (inputLength: number) => number;
-};
-
-type RenderEngine = "sine" | "an74689";
-
-type SequenceEnvelope = {
-  id: number;
-  speed: number;
-  values: number[];
-  loopStart?: number;
+  mkvdrv_export_song_json_from_buffer: (inputLength: number) => number;
+  mkvdrv_exported_song_json_ptr: () => number;
+  mkvdrv_exported_song_json_len: () => number;
 };
 
 type WasmRuntime = {
@@ -256,6 +256,8 @@ const startButton = document.querySelector<HTMLButtonElement>("#start-button");
 const sequenceButton =
   document.querySelector<HTMLButtonElement>("#sequence-button");
 const mmlButton = document.querySelector<HTMLButtonElement>("#mml-button");
+const exportButton =
+  document.querySelector<HTMLButtonElement>("#export-button");
 const stopButton = document.querySelector<HTMLButtonElement>("#stop-button");
 const frequencyInput = document.querySelector<HTMLInputElement>("#frequency");
 const frequencyValue = document.querySelector<HTMLElement>("#frequency-value");
@@ -1095,6 +1097,17 @@ const readEnvelopeDefinitions = (runtime: WasmRuntime): SequenceEnvelope[] => {
   });
 };
 
+const readExportedSongJson = (runtime: WasmRuntime): string => {
+  const pointer = runtime.exports.mkvdrv_exported_song_json_ptr();
+  const length = runtime.exports.mkvdrv_exported_song_json_len();
+
+  if (length === 0) {
+    return "";
+  }
+
+  return readUtf8(runtime.exports.memory, pointer, length);
+};
+
 const parseMmlText = (
   runtime: WasmRuntime,
   source: string
@@ -1158,6 +1171,70 @@ const parseMmlText = (
   };
 };
 
+const exportMmlSongJson = (
+  runtime: WasmRuntime,
+  source: string
+): ExportedSong => {
+  const encoder = new TextEncoder();
+  const encoded = encoder.encode(source);
+  const capacity = runtime.exports.mkvdrv_mml_input_buffer_capacity();
+
+  clearMmlError();
+
+  if (encoded.length > capacity) {
+    throw new Error(`MML input exceeds buffer capacity (${capacity} bytes).`);
+  }
+
+  const bufferPointer = runtime.exports.mkvdrv_mml_input_buffer_ptr();
+  const buffer = new Uint8Array(
+    runtime.exports.memory.buffer,
+    bufferPointer,
+    capacity
+  );
+  buffer.fill(0);
+  buffer.set(encoded);
+
+  runtime.exports.mkvdrv_set_conditional_branch_index(currentBranchIndex());
+  const jsonLength = runtime.exports.mkvdrv_export_song_json_from_buffer(
+    encoded.length
+  );
+
+  if (jsonLength === 0) {
+    const parseError = readParseError(runtime);
+    overlayDiagnostics = readParseDiagnostics(runtime).map((diagnostic) => ({
+      ...diagnostic,
+      start: locateTextOffset(source, diagnostic.start).offset,
+      end: locateTextOffset(source, diagnostic.end).offset,
+      relatedPosition:
+        diagnostic.relatedPosition === undefined
+          ? undefined
+          : locateTextOffset(source, diagnostic.relatedPosition).offset
+    }));
+
+    if (overlayDiagnostics.length === 0) {
+      const locationOffset = locateTextOffset(source, parseError.position).offset;
+      overlayDiagnostics = [
+        {
+          start: locationOffset,
+          end: Math.min(source.length, locationOffset + 1),
+          message: parseError.message,
+          quickFixes: [],
+          source: "parser"
+        }
+      ];
+    }
+
+    const location = selectDiagnostic(source, overlayDiagnostics[0]);
+
+    throw new Error(
+      `${parseError.message} at offset ${location.offset} (line ${location.line}, column ${location.column})`
+    );
+  }
+
+  const exported = readExportedSongJson(runtime);
+  return JSON.parse(exported) as ExportedSong;
+};
+
 const configureNode = (
   node: AudioWorkletNode,
   runtime: WasmRuntime
@@ -1169,6 +1246,20 @@ const configureNode = (
     frequency: currentFrequency(),
     noteFrequencies: runtime.noteFrequencies
   });
+};
+
+const downloadTextFile = (
+  filename: string,
+  contents: string,
+  contentType: string
+) => {
+  const blob = new Blob([contents], { type: contentType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
 };
 
 const boot = async () => {
@@ -1264,6 +1355,23 @@ mmlButton?.addEventListener("click", async () => {
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     updateLog(`Failed to parse or play MML.\n${reason}`);
+  }
+});
+
+exportButton?.addEventListener("click", async () => {
+  try {
+    const runtime = await loadRuntime();
+    const source = mmlInput?.value ?? "";
+    const exportedSong = exportMmlSongJson(runtime, source);
+    const json = JSON.stringify(exportedSong, null, 2);
+
+    downloadTextFile("mkvdrv-song.json", json, "application/json");
+    updateLog(
+      `${runtime.message}\nExported song format: ${exportedSong.format}/v${exportedSong.version}\nEvents: ${exportedSong.events.length}\nEnvelopes: ${exportedSong.envelopes.length}\nSaved as mkvdrv-song.json`
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    updateLog(`Failed to export song JSON.\n${reason}`);
   }
 });
 

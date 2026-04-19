@@ -2,7 +2,7 @@
 
 MKVDRV-Wasm は、MKVDRV の設計思想と MDSDRV-mml 互換を継承しつつ、ブラウザ上で動作する次世代サウンドドライバを Rust + WebAssembly で構築するプロジェクトです。
 
-現時点では Stage 1 の土台として、Rust/Wasm の `core` と Vite/TypeScript の `web` を分離したモノレポ構成に加え、ブラウザ上での単音再生、Rust 側で生成したノートイベント列による簡易シーケンス再生、そして `t l o v w @E <> cdefgab r Q q C ^ & R ~ [ ] { }` と `:ticks` 指定を扱う最小 MML パーサと MML 入力欄まで実装済みです。さらに、MML パース失敗時の byte 位置返却、`{}` の branch selection 文脈切り替え、サンプル MML 切り替え、エラー位置へのカーソル移動、周辺行表示、入力欄内の簡易ハイライトオーバーレイ、トークン種別ごとの軽い色分け、Rust 側からの複数診断返却、現在行ハイライト、トークン凡例、`_reference` 仕様書に結び付いた未対応コマンド候補、`examples.md` ベースの短い代替断片、quick fix 風の置換導線、loop/conditional 文脈ヒント、対応する開き括弧位置へのジャンプとペアハイライトも追加しています。音源側は次段として `AN74689` 互換 PSG 方向へ進める方針で、現時点では `Sound Engine` 切り替え、`tone 3ch + noise 1ch` の内部チャンネル構造、`A / B / C / N` による同時再生、PSG 寄りの coarse volume カーブ、`@E` によるソフトウェアエンベロープ定義と選択、そして `channel / volume / noise / envelope` を載せられるイベント列フォーマットまで着手しています。
+現時点では Stage 1 の土台として、Rust/Wasm の `core` と Vite/TypeScript の `web` を分離したモノレポ構成に加え、ブラウザ上での単音再生、Rust 側で生成したノートイベント列による簡易シーケンス再生、そして `t l o v w @E <> cdefgab r Q q C ^ & R ~ [ ] { }` と `:ticks` 指定を扱う最小 MML パーサと MML 入力欄まで実装済みです。さらに、MML パース失敗時の byte 位置返却、`{}` の branch selection 文脈切り替え、サンプル MML 切り替え、エラー位置へのカーソル移動、周辺行表示、入力欄内の簡易ハイライトオーバーレイ、トークン種別ごとの軽い色分け、Rust 側からの複数診断返却、現在行ハイライト、トークン凡例、`_reference` 仕様書に結び付いた未対応コマンド候補、`examples.md` ベースの短い代替断片、quick fix 風の置換導線、loop/conditional 文脈ヒント、対応する開き括弧位置へのジャンプとペアハイライトも追加しています。音源側は次段として `AN74689` 互換 PSG 方向へ進める方針で、現時点では `Sound Engine` 切り替え、`tone 3ch + noise 1ch` の内部チャンネル構造、`A / B / C / N` による同時再生、PSG 寄りの coarse volume カーブ、`@E` によるソフトウェアエンベロープ定義と選択、`mkvdrv-song` JSON 形式での楽曲エクスポート、そして HTML5 ゲーム側で読み込める単体エンジン分離まで着手しています。
 
 ## ディレクトリ構成
 
@@ -51,9 +51,10 @@ cargo build -p mkvdrv-wasm-core --target wasm32-unknown-unknown
 cd web
 npm install
 npm run dev
+npm run build:engine
 ```
 
-初回の `npm run dev` / `npm run build` / `npm run check` では、事前に `npm` スクリプトから `../scripts/build-wasm.sh` が呼ばれ、`core` の Wasm バイナリが `web/public/wasm/mkvdrv_wasm_core.wasm` に同期されます。
+初回の `npm run dev` / `npm run build` / `npm run check` / `npm run build:engine` では、事前に `npm` スクリプトから `../scripts/build-wasm.sh` が呼ばれ、`core` の Wasm バイナリが `web/public/wasm/mkvdrv_wasm_core.wasm` に同期されます。`npm run build:engine` を使うと、ゲーム組み込み向けの配布用 JS が `web/dist-engine/mkvdrv-game-audio-engine.js` として出力されます。
 
 ### ブラウザでの確認
 
@@ -69,6 +70,7 @@ npm run dev
 10. 行頭に `A` `B` `C` `N` を書くと、tone 3ch / noise 1ch へ MML を振り分け、各チャンネルを同時再生で確認できる
 11. `N` チャンネル上で `v<num>` による coarse volume、`w0` / `w1` による periodic / white noise 切り替えを試せる
 12. `@E1={1,0,2,4,6,8}` のような定義と `@E1` 選択で、ノート Key-On ごとにソフトウェアエンベロープを適用できる
+13. `Export Song JSON` で、現在の MML を `mkvdrv-song` v1 JSON として書き出せる
 
 パース失敗時は、Web 側ログに Rust パーサが返した error message と `offset / line / column` を表示します。加えて、MML 入力欄へフォーカスしたうえで該当位置を選択し、入力欄の直下にエラー要約と該当行のコンテキストを表示します。入力欄は簡易オーバーレイで描画しているため、音符・コマンド・数値・括弧などを軽く色分けしたうえで、エラー文字付近を背景色で強調表示できます。現在行は淡いハイライトで追従し、凡例で色の意味も確認できます。Rust 側は現時点で複数診断バッファを返せるため、構造エラーを複数同時に表示する土台があり、未対応コマンドらしい文字は `_reference/mml_spec/commands.md` と `_reference/mml_spec/examples.md` に寄せた代替書き方と短い置き換え断片付きで補足します。quick fix がある診断では、UI から複数候補のラベルを切り替えつつ、診断番号と位置付きの置換前後プレビューを確認してから適用できます。対応する開き括弧位置が取れる診断では、その開始位置へ直接ジャンプでき、opening 側も入力欄内でペアハイライトされます。現状の位置情報は UTF-8 byte offset をベースにしており、ASCII 中心の MML 記述ではそのまま文字位置として扱えます。
 
@@ -76,13 +78,13 @@ Chrome / Safari 系では、ユーザー操作後に `AudioContext` が有効に
 
 ## 次の実装ステップ
 
-1. `AN74689` 互換 PSG の最小音源コアを `web/src/processor.ts` 上で育て、tone period や noise frequency の扱いをチップ寄りに整理する
-2. イベント列を、将来的な PSG/FM 共通化を見据えた制御イベント込みの形式へ整理する
-3. `web` 側に簡易入力欄から一歩進めたエディタ機能を追加
+1. `AN74689` 互換 PSG の最小音源コアを `web/src/song-runtime.ts` 上で育て、tone period や noise frequency の扱いをチップ寄りに整理する
+2. `mkvdrv-song` を JSON から compact binary へも落とせるようにし、配布形式を整理する
+3. `web/src/game-audio-engine.ts` を土台に、BGM / SFX の同居や loop 制御 API を追加する
 4. 分岐選択文脈を単一 index から将来的な複数条件文脈へ拡張しやすい形へ整理
 5. `_reference` に MML 仕様・旧実装・ハードウェア資料を段階的に蓄積
 
-直近の作業計画は [直近改修計画.md](/Users/junt74/Projects/webasm/webasm-mkvdrv/直近改修計画.md) に記載します。実装を行った際は、その都度この計画ファイルも更新し、完了項目・次の着手項目・優先順が現状と一致する状態を保つものとします。
+直近の作業計画は [直近改修計画.md](/Users/junt74/Projects/webasm/webasm-mkvdrv/直近改修計画.md) に記載します。楽曲データ形式の詳細は [楽曲データエクスポート仕様.md](/Users/junt74/Projects/webasm/webasm-mkvdrv/楽曲データエクスポート仕様.md) を参照してください。実装を行った際は、その都度この計画ファイルも更新し、完了項目・次の着手項目・優先順が現状と一致する状態を保つものとします。
 
 ## メモ
 
