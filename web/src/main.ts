@@ -65,6 +65,30 @@ app.innerHTML = `
         <strong>MML Error</strong>
         <p id="mml-error-summary" class="mml-error-summary"></p>
         <div id="mml-error-actions" class="mml-error-actions"></div>
+        <div id="mml-quick-fix-preview" class="mml-quick-fix-preview" hidden>
+          <strong>Quick Fix Preview</strong>
+          <p id="mml-quick-fix-label" class="mml-quick-fix-label"></p>
+          <p id="mml-quick-fix-meta" class="mml-quick-fix-meta"></p>
+          <div id="mml-quick-fix-options" class="mml-quick-fix-options"></div>
+          <div class="mml-quick-fix-columns">
+            <div class="mml-quick-fix-card">
+              <span class="mml-quick-fix-heading">Before</span>
+              <pre id="mml-quick-fix-before" class="mml-quick-fix-code"></pre>
+            </div>
+            <div class="mml-quick-fix-card">
+              <span class="mml-quick-fix-heading">After</span>
+              <pre id="mml-quick-fix-after" class="mml-quick-fix-code"></pre>
+            </div>
+          </div>
+          <div class="mml-quick-fix-actions">
+            <button id="mml-quick-fix-apply" class="mml-error-jump" type="button">
+              プレビュー内容を適用
+            </button>
+            <button id="mml-quick-fix-cancel" class="mml-error-jump" type="button">
+              キャンセル
+            </button>
+          </div>
+        </div>
         <pre id="mml-error-context" class="mml-error-context"></pre>
       </div>
       <pre id="log-output" class="log">Booting MKVDRV-Wasm...</pre>
@@ -105,8 +129,16 @@ type MkvdrvWasmExports = {
   mkvdrv_parse_diagnostic_ends_ptr: () => number;
   mkvdrv_parse_diagnostic_related_positions_ptr: () => number;
   mkvdrv_parse_diagnostic_message_lens_ptr: () => number;
+  mkvdrv_parse_diagnostic_quick_fix_counts_ptr: () => number;
   mkvdrv_parse_diagnostic_messages_ptr: () => number;
+  mkvdrv_parse_diagnostic_quick_fix_label_lens_ptr: () => number;
+  mkvdrv_parse_diagnostic_quick_fix_replacement_lens_ptr: () => number;
+  mkvdrv_parse_diagnostic_quick_fix_labels_ptr: () => number;
+  mkvdrv_parse_diagnostic_quick_fix_replacements_ptr: () => number;
   mkvdrv_parse_diagnostic_message_stride: () => number;
+  mkvdrv_parse_diagnostic_quick_fix_slot_count: () => number;
+  mkvdrv_parse_diagnostic_quick_fix_label_stride: () => number;
+  mkvdrv_parse_diagnostic_quick_fix_replacement_stride: () => number;
   mkvdrv_parse_mml_from_buffer: (inputLength: number) => number;
 };
 
@@ -125,15 +157,30 @@ let audioContext: AudioContext | undefined;
 let workletNode: AudioWorkletNode | undefined;
 let activeLineRange = { start: 0, end: 0 };
 
+type QuickFixCandidate = {
+  label: string;
+  replacement: string;
+};
+
 type MmlDiagnostic = {
   start: number;
   end: number;
   message: string;
   source: "parser" | "overlay";
   relatedPosition?: number;
+  quickFixes: QuickFixCandidate[];
 };
 
 let overlayDiagnostics: MmlDiagnostic[] = [];
+let pendingQuickFix:
+  | {
+      diagnostic: MmlDiagnostic;
+      diagnosticIndex: number;
+      candidateIndex: number;
+      beforeRange: string;
+      afterRange: string;
+    }
+  | undefined;
 
 const MML_SAMPLES = {
   arp: {
@@ -187,6 +234,30 @@ const mmlErrorSummary =
   document.querySelector<HTMLElement>("#mml-error-summary");
 const mmlErrorActions =
   document.querySelector<HTMLDivElement>("#mml-error-actions");
+const mmlQuickFixPreview = document.querySelector<HTMLDivElement>(
+  "#mml-quick-fix-preview"
+);
+const mmlQuickFixLabel = document.querySelector<HTMLElement>(
+  "#mml-quick-fix-label"
+);
+const mmlQuickFixMeta = document.querySelector<HTMLElement>(
+  "#mml-quick-fix-meta"
+);
+const mmlQuickFixOptions = document.querySelector<HTMLDivElement>(
+  "#mml-quick-fix-options"
+);
+const mmlQuickFixBefore = document.querySelector<HTMLElement>(
+  "#mml-quick-fix-before"
+);
+const mmlQuickFixAfter = document.querySelector<HTMLElement>(
+  "#mml-quick-fix-after"
+);
+const mmlQuickFixApply = document.querySelector<HTMLButtonElement>(
+  "#mml-quick-fix-apply"
+);
+const mmlQuickFixCancel = document.querySelector<HTMLButtonElement>(
+  "#mml-quick-fix-cancel"
+);
 const mmlErrorContext =
   document.querySelector<HTMLElement>("#mml-error-context");
 const logOutput = document.querySelector<HTMLElement>("#log-output");
@@ -201,6 +272,7 @@ const updateLog = (message: string) => {
 
 const clearMmlError = () => {
   overlayDiagnostics = [];
+  pendingQuickFix = undefined;
   mmlInput?.classList.remove("mml-editor-error");
   mmlEditorShell?.classList.remove("mml-editor-shell-error");
 
@@ -218,6 +290,30 @@ const clearMmlError = () => {
 
   if (mmlErrorActions) {
     mmlErrorActions.innerHTML = "";
+  }
+
+  if (mmlQuickFixPreview) {
+    mmlQuickFixPreview.hidden = true;
+  }
+
+  if (mmlQuickFixLabel) {
+    mmlQuickFixLabel.textContent = "";
+  }
+
+  if (mmlQuickFixMeta) {
+    mmlQuickFixMeta.textContent = "";
+  }
+
+  if (mmlQuickFixBefore) {
+    mmlQuickFixBefore.textContent = "";
+  }
+
+  if (mmlQuickFixAfter) {
+    mmlQuickFixAfter.textContent = "";
+  }
+
+  if (mmlQuickFixOptions) {
+    mmlQuickFixOptions.innerHTML = "";
   }
 
   renderMmlOverlay();
@@ -428,8 +524,31 @@ const readParseDiagnostics = (runtime: WasmRuntime): MmlDiagnostic[] => {
     runtime.exports.mkvdrv_parse_diagnostic_message_lens_ptr(),
     count
   );
+  const quickFixCounts = new Uint32Array(
+    runtime.exports.memory.buffer,
+    runtime.exports.mkvdrv_parse_diagnostic_quick_fix_counts_ptr(),
+    count
+  );
+  const quickFixSlotCount = runtime.exports.mkvdrv_parse_diagnostic_quick_fix_slot_count();
+  const quickFixLabelLens = new Uint32Array(
+    runtime.exports.memory.buffer,
+    runtime.exports.mkvdrv_parse_diagnostic_quick_fix_label_lens_ptr(),
+    count * quickFixSlotCount
+  );
+  const quickFixReplacementLens = new Uint32Array(
+    runtime.exports.memory.buffer,
+    runtime.exports.mkvdrv_parse_diagnostic_quick_fix_replacement_lens_ptr(),
+    count * quickFixSlotCount
+  );
   const messageStride = runtime.exports.mkvdrv_parse_diagnostic_message_stride();
+  const quickFixLabelStride =
+    runtime.exports.mkvdrv_parse_diagnostic_quick_fix_label_stride();
+  const quickFixReplacementStride =
+    runtime.exports.mkvdrv_parse_diagnostic_quick_fix_replacement_stride();
   const messageBase = runtime.exports.mkvdrv_parse_diagnostic_messages_ptr();
+  const quickFixLabelBase = runtime.exports.mkvdrv_parse_diagnostic_quick_fix_labels_ptr();
+  const quickFixReplacementBase =
+    runtime.exports.mkvdrv_parse_diagnostic_quick_fix_replacements_ptr();
 
   return Array.from({ length: count }, (_, index) => ({
     start: positions[index],
@@ -440,6 +559,24 @@ const readParseDiagnostics = (runtime: WasmRuntime): MmlDiagnostic[] => {
       runtime.exports.memory,
       messageBase + index * messageStride,
       messageLens[index]
+    ),
+    quickFixes: Array.from(
+      { length: Math.min(quickFixCounts[index], quickFixSlotCount) },
+      (_, slotIndex) => {
+        const flatIndex = index * quickFixSlotCount + slotIndex;
+        return {
+          label: readUtf8(
+            runtime.exports.memory,
+            quickFixLabelBase + flatIndex * quickFixLabelStride,
+            quickFixLabelLens[flatIndex]
+          ),
+          replacement: readUtf8(
+            runtime.exports.memory,
+            quickFixReplacementBase + flatIndex * quickFixReplacementStride,
+            quickFixReplacementLens[flatIndex]
+          )
+        };
+      }
     ),
     source: "parser" as const
   }));
@@ -563,6 +700,128 @@ const buildErrorContext = (source: string, index: number) => {
   return `${lineText}\n${markerPadding}^`;
 };
 
+const buildQuickFixPreviewRange = (
+  source: string,
+  start: number,
+  end: number,
+  replacement: string
+) => {
+  const location = locateTextOffset(source, start);
+  const lineStart = source.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+  const lineEndIndex = source.indexOf("\n", end);
+  const lineEnd = lineEndIndex === -1 ? source.length : lineEndIndex;
+  const linePrefix = source.slice(lineStart, start);
+  const lineTarget = source.slice(start, end);
+  const lineSuffix = source.slice(end, lineEnd);
+  const beforeMarker = `${" ".repeat(linePrefix.length)}${"^".repeat(
+    Math.max(1, lineTarget.length)
+  )}`;
+  const afterMarker = `${" ".repeat(linePrefix.length)}${"^".repeat(
+    Math.max(1, replacement.length)
+  )}`;
+  const lineLabel = `L${location.line} | `;
+
+  return {
+    beforeRange:
+      `${lineLabel}${linePrefix}[${lineTarget || " "}]\n` +
+      `${" ".repeat(lineLabel.length)}${beforeMarker}`,
+    afterRange:
+      `${lineLabel}${linePrefix}[${replacement}]\n` +
+      `${" ".repeat(lineLabel.length)}${afterMarker}`,
+    location
+  };
+};
+
+const hideQuickFixPreview = () => {
+  pendingQuickFix = undefined;
+
+  if (mmlQuickFixPreview) {
+    mmlQuickFixPreview.hidden = true;
+  }
+
+  if (mmlQuickFixLabel) {
+    mmlQuickFixLabel.textContent = "";
+  }
+
+  if (mmlQuickFixMeta) {
+    mmlQuickFixMeta.textContent = "";
+  }
+
+  if (mmlQuickFixBefore) {
+    mmlQuickFixBefore.textContent = "";
+  }
+
+  if (mmlQuickFixAfter) {
+    mmlQuickFixAfter.textContent = "";
+  }
+};
+
+const showQuickFixPreview = (
+  diagnostic: MmlDiagnostic,
+  diagnosticIndex: number,
+  candidateIndex: number,
+  source: string
+) => {
+  const candidate = diagnostic.quickFixes[candidateIndex];
+  if (!candidate) {
+    return;
+  }
+
+  const { beforeRange, afterRange, location } = buildQuickFixPreviewRange(
+    source,
+    diagnostic.start,
+    diagnostic.end,
+    candidate.replacement
+  );
+
+  pendingQuickFix = {
+    diagnostic,
+    diagnosticIndex,
+    candidateIndex,
+    beforeRange,
+    afterRange
+  };
+
+  if (mmlQuickFixPreview) {
+    mmlQuickFixPreview.hidden = false;
+  }
+
+  if (mmlQuickFixLabel) {
+    mmlQuickFixLabel.textContent = diagnostic.message;
+  }
+
+  if (mmlQuickFixMeta) {
+    mmlQuickFixMeta.textContent =
+      `diagnostic #${diagnosticIndex + 1} at line ${location.line}, column ${location.column} ` +
+      `| candidate ${candidateIndex + 1}: ${candidate.label} | [ ] marks replacement range`;
+  }
+
+  if (mmlQuickFixOptions) {
+    mmlQuickFixOptions.innerHTML = "";
+    diagnostic.quickFixes.forEach((entry, entryIndex) => {
+      const optionButton = document.createElement("button");
+      optionButton.type = "button";
+      optionButton.className = "mml-error-jump";
+      if (entryIndex === candidateIndex) {
+        optionButton.classList.add("mml-error-jump-active");
+      }
+      optionButton.textContent = `${entryIndex + 1}. ${entry.label}`;
+      optionButton.addEventListener("click", () => {
+        showQuickFixPreview(diagnostic, diagnosticIndex, entryIndex, source);
+      });
+      mmlQuickFixOptions.appendChild(optionButton);
+    });
+  }
+
+  if (mmlQuickFixBefore) {
+    mmlQuickFixBefore.textContent = beforeRange;
+  }
+
+  if (mmlQuickFixAfter) {
+    mmlQuickFixAfter.textContent = afterRange;
+  }
+};
+
 const selectDiagnostic = (source: string, diagnostic: MmlDiagnostic) => {
   const location = locateTextOffset(source, diagnostic.start);
   const selectionStart = Math.max(0, Math.min(source.length, diagnostic.start));
@@ -600,6 +859,17 @@ const selectDiagnostic = (source: string, diagnostic: MmlDiagnostic) => {
     mmlErrorActions.innerHTML = "";
 
     overlayDiagnostics.forEach((entry, diagnosticIndex) => {
+      if (entry.quickFixes.length > 0) {
+        const quickFixButton = document.createElement("button");
+        quickFixButton.type = "button";
+        quickFixButton.className = "mml-error-jump";
+        quickFixButton.textContent = `#${diagnosticIndex + 1} の候補をプレビュー`;
+        quickFixButton.addEventListener("click", () => {
+          showQuickFixPreview(entry, diagnosticIndex, 0, source);
+        });
+        mmlErrorActions.appendChild(quickFixButton);
+      }
+
       if (entry.relatedPosition === undefined) {
         return;
       }
@@ -641,6 +911,39 @@ const selectTextRange = (source: string, start: number, end: number) => {
 
   updateActiveLineRange();
   renderMmlOverlay();
+};
+
+const applyQuickFix = (diagnostic: MmlDiagnostic, candidateIndex: number) => {
+  const candidate = diagnostic.quickFixes[candidateIndex];
+  if (!mmlInput || !candidate) {
+    return;
+  }
+
+  const source = mmlInput.value;
+  const nextValue =
+    source.slice(0, diagnostic.start) +
+    candidate.replacement +
+    source.slice(diagnostic.end);
+  const selectionEnd = diagnostic.start + candidate.replacement.length;
+
+  mmlInput.value = nextValue;
+  clearMmlError();
+  mmlInput.focus();
+  mmlInput.setSelectionRange(diagnostic.start, selectionEnd);
+  updateActiveLineRange();
+  updateSampleSelection(nextValue);
+  renderMmlOverlay();
+  updateLog(
+    `Quick fix applied.\nSelected candidate: ${candidate.label}\nInserted fragment: ${candidate.replacement}`
+  );
+};
+
+const confirmQuickFix = () => {
+  if (!pendingQuickFix) {
+    return;
+  }
+
+  applyQuickFix(pendingQuickFix.diagnostic, pendingQuickFix.candidateIndex);
 };
 
 const readParseError = (runtime: WasmRuntime) => {
@@ -744,6 +1047,7 @@ const parseMmlText = (runtime: WasmRuntime, source: string): Uint32Array => {
           start: locationOffset,
           end: Math.min(source.length, locationOffset + 1),
           message: parseError.message,
+          quickFixes: [],
           source: "parser"
         }
       ];
@@ -898,7 +1202,16 @@ branchIndexInput?.addEventListener("input", () => {
   updateBranchLabel();
 });
 
+mmlQuickFixApply?.addEventListener("click", () => {
+  confirmQuickFix();
+});
+
+mmlQuickFixCancel?.addEventListener("click", () => {
+  hideQuickFixPreview();
+});
+
 mmlInput?.addEventListener("input", () => {
+  hideQuickFixPreview();
   clearMmlError();
   updateActiveLineRange();
   updateSampleSelection(mmlInput.value);

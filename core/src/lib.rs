@@ -5,7 +5,7 @@ use core::str;
 
 use mml::{
     collect_parse_diagnostics_with_context, format_parse_failure_with_context,
-    parse_mml_with_context, ParseFailure,
+    parse_failure_quick_fixes, parse_mml_with_context, ParseFailure,
 };
 
 #[cfg(test)]
@@ -29,6 +29,9 @@ static mut MML_INPUT_BUFFER: [u8; MML_INPUT_CAPACITY] = [0; MML_INPUT_CAPACITY];
 const LAST_PARSE_ERROR_MESSAGE_CAPACITY: usize = 256;
 const PARSE_DIAGNOSTIC_CAPACITY: usize = 16;
 const PARSE_DIAGNOSTIC_MESSAGE_CAPACITY: usize = 128;
+const PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY: usize = 3;
+const PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_CAPACITY: usize = 48;
+const PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY: usize = 128;
 static mut LAST_PARSE_ERROR_MESSAGE: [u8; LAST_PARSE_ERROR_MESSAGE_CAPACITY] =
     [0; LAST_PARSE_ERROR_MESSAGE_CAPACITY];
 static mut LAST_PARSE_ERROR_MESSAGE_LEN: usize = 0;
@@ -40,8 +43,32 @@ static mut PARSE_DIAGNOSTIC_RELATED_POSITIONS: [usize; PARSE_DIAGNOSTIC_CAPACITY
     [usize::MAX; PARSE_DIAGNOSTIC_CAPACITY];
 static mut PARSE_DIAGNOSTIC_MESSAGE_LENS: [usize; PARSE_DIAGNOSTIC_CAPACITY] =
     [0; PARSE_DIAGNOSTIC_CAPACITY];
+static mut PARSE_DIAGNOSTIC_QUICK_FIX_COUNTS: [usize; PARSE_DIAGNOSTIC_CAPACITY] =
+    [0; PARSE_DIAGNOSTIC_CAPACITY];
+static mut PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_LENS: [usize;
+    PARSE_DIAGNOSTIC_CAPACITY * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY] =
+    [0; PARSE_DIAGNOSTIC_CAPACITY * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY];
+static mut PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_LENS: [usize;
+    PARSE_DIAGNOSTIC_CAPACITY * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY] =
+    [0; PARSE_DIAGNOSTIC_CAPACITY * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY];
 static mut PARSE_DIAGNOSTIC_MESSAGES: [u8; PARSE_DIAGNOSTIC_CAPACITY * PARSE_DIAGNOSTIC_MESSAGE_CAPACITY] =
     [0; PARSE_DIAGNOSTIC_CAPACITY * PARSE_DIAGNOSTIC_MESSAGE_CAPACITY];
+static mut PARSE_DIAGNOSTIC_QUICK_FIX_LABELS: [u8;
+    PARSE_DIAGNOSTIC_CAPACITY
+        * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY
+        * PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_CAPACITY] =
+    [0;
+        PARSE_DIAGNOSTIC_CAPACITY
+            * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY
+            * PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_CAPACITY];
+static mut PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENTS: [u8;
+    PARSE_DIAGNOSTIC_CAPACITY
+        * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY
+        * PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY] =
+    [0;
+        PARSE_DIAGNOSTIC_CAPACITY
+            * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY
+            * PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY];
 static mut CONDITIONAL_BRANCH_INDEX: usize = 0;
 
 const DEMO_MML: &str = "t124 o4 l16 ceg>c<g e c r dfa>b<a f d r";
@@ -173,13 +200,53 @@ pub extern "C" fn mkvdrv_parse_diagnostic_message_lens_ptr() -> *const usize {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_parse_diagnostic_quick_fix_counts_ptr() -> *const usize {
+    core::ptr::addr_of!(PARSE_DIAGNOSTIC_QUICK_FIX_COUNTS).cast::<usize>()
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn mkvdrv_parse_diagnostic_messages_ptr() -> *const u8 {
     core::ptr::addr_of!(PARSE_DIAGNOSTIC_MESSAGES).cast::<u8>()
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_parse_diagnostic_quick_fix_label_lens_ptr() -> *const usize {
+    core::ptr::addr_of!(PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_LENS).cast::<usize>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_parse_diagnostic_quick_fix_replacement_lens_ptr() -> *const usize {
+    core::ptr::addr_of!(PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_LENS).cast::<usize>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_parse_diagnostic_quick_fix_labels_ptr() -> *const u8 {
+    core::ptr::addr_of!(PARSE_DIAGNOSTIC_QUICK_FIX_LABELS).cast::<u8>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_parse_diagnostic_quick_fix_replacements_ptr() -> *const u8 {
+    core::ptr::addr_of!(PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENTS).cast::<u8>()
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn mkvdrv_parse_diagnostic_message_stride() -> usize {
     PARSE_DIAGNOSTIC_MESSAGE_CAPACITY
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_parse_diagnostic_quick_fix_slot_count() -> usize {
+    PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_parse_diagnostic_quick_fix_label_stride() -> usize {
+    PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_CAPACITY
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_parse_diagnostic_quick_fix_replacement_stride() -> usize {
+    PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY
 }
 
 #[unsafe(no_mangle)]
@@ -225,9 +292,26 @@ fn clear_parse_failure() {
             PARSE_DIAGNOSTIC_ENDS[index] = 0;
             PARSE_DIAGNOSTIC_RELATED_POSITIONS[index] = usize::MAX;
             PARSE_DIAGNOSTIC_MESSAGE_LENS[index] = 0;
+            PARSE_DIAGNOSTIC_QUICK_FIX_COUNTS[index] = 0;
         }
         for index in 0..(PARSE_DIAGNOSTIC_CAPACITY * PARSE_DIAGNOSTIC_MESSAGE_CAPACITY) {
             PARSE_DIAGNOSTIC_MESSAGES[index] = 0;
+        }
+        for index in 0..(PARSE_DIAGNOSTIC_CAPACITY * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY) {
+            PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_LENS[index] = 0;
+            PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_LENS[index] = 0;
+        }
+        for index in 0..(PARSE_DIAGNOSTIC_CAPACITY
+            * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY
+            * PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_CAPACITY)
+        {
+            PARSE_DIAGNOSTIC_QUICK_FIX_LABELS[index] = 0;
+        }
+        for index in 0..(PARSE_DIAGNOSTIC_CAPACITY
+            * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY
+            * PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY)
+        {
+            PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENTS[index] = 0;
         }
     }
 }
@@ -272,13 +356,16 @@ fn store_parse_diagnostics(source: &str, diagnostics: &[ParseFailure], branch_in
         let message = format_parse_failure_with_context(source, diagnostic, branch_index);
         let bytes = message.as_bytes();
         let copy_len = bytes.len().min(PARSE_DIAGNOSTIC_MESSAGE_CAPACITY);
+        let quick_fixes = parse_failure_quick_fixes(source, diagnostic);
 
         unsafe {
             PARSE_DIAGNOSTIC_POSITIONS[index] = diagnostic.position;
-            PARSE_DIAGNOSTIC_ENDS[index] = diagnostic.end_position(source.len());
+            PARSE_DIAGNOSTIC_ENDS[index] = diagnostic.span_end(source);
             PARSE_DIAGNOSTIC_RELATED_POSITIONS[index] =
                 diagnostic.related_position.unwrap_or(usize::MAX);
             PARSE_DIAGNOSTIC_MESSAGE_LENS[index] = copy_len;
+            PARSE_DIAGNOSTIC_QUICK_FIX_COUNTS[index] =
+                quick_fixes.len().min(PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY);
 
             for slot in start..end {
                 PARSE_DIAGNOSTIC_MESSAGES[slot] = 0;
@@ -286,6 +373,53 @@ fn store_parse_diagnostics(source: &str, diagnostics: &[ParseFailure], branch_in
 
             for (offset, byte) in bytes.iter().take(copy_len).enumerate() {
                 PARSE_DIAGNOSTIC_MESSAGES[start + offset] = *byte;
+            }
+
+            for slot_index in 0..PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY {
+                let flat_index = index * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY + slot_index;
+                let label_start = flat_index * PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_CAPACITY;
+                let label_end = label_start + PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_CAPACITY;
+                let replacement_start =
+                    flat_index * PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY;
+                let replacement_end =
+                    replacement_start + PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY;
+
+                PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_LENS[flat_index] = 0;
+                PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_LENS[flat_index] = 0;
+
+                for slot in label_start..label_end {
+                    PARSE_DIAGNOSTIC_QUICK_FIX_LABELS[slot] = 0;
+                }
+                for slot in replacement_start..replacement_end {
+                    PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENTS[slot] = 0;
+                }
+            }
+
+            for (slot_index, quick_fix) in quick_fixes
+                .iter()
+                .take(PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY)
+                .enumerate()
+            {
+                let flat_index = index * PARSE_DIAGNOSTIC_QUICK_FIX_SLOT_CAPACITY + slot_index;
+                let label_start = flat_index * PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_CAPACITY;
+                let replacement_start =
+                    flat_index * PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY;
+                let label_bytes = quick_fix.label.as_bytes();
+                let replacement_bytes = quick_fix.replacement.as_bytes();
+                let label_len = label_bytes.len().min(PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_CAPACITY);
+                let replacement_len = replacement_bytes
+                    .len()
+                    .min(PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY);
+
+                PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_LENS[flat_index] = label_len;
+                PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_LENS[flat_index] = replacement_len;
+
+                for (offset, byte) in label_bytes.iter().take(label_len).enumerate() {
+                    PARSE_DIAGNOSTIC_QUICK_FIX_LABELS[label_start + offset] = *byte;
+                }
+                for (offset, byte) in replacement_bytes.iter().take(replacement_len).enumerate() {
+                    PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENTS[replacement_start + offset] = *byte;
+                }
             }
         }
     }
@@ -406,6 +540,30 @@ mod tests {
         assert!(message.contains("missing parameter for 'C'"));
         assert!(message.contains("ticks-per-whole expects a number"));
         assert_eq!(mkvdrv_parse_diagnostic_count(), 1);
+        assert_eq!(unsafe { PARSE_DIAGNOSTIC_QUICK_FIX_COUNTS[0] }, 2);
+
+        let first_label_len = unsafe { PARSE_DIAGNOSTIC_QUICK_FIX_LABEL_LENS[0] };
+        let first_replacement_len = unsafe { PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_LENS[0] };
+        let second_replacement_len = unsafe { PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_LENS[1] };
+        let first_label = unsafe {
+            str::from_utf8_unchecked(&PARSE_DIAGNOSTIC_QUICK_FIX_LABELS[..first_label_len])
+        };
+        let first_replacement = unsafe {
+            str::from_utf8_unchecked(
+                &PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENTS[..first_replacement_len],
+            )
+        };
+        let second_replacement_start = PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENT_CAPACITY;
+        let second_replacement = unsafe {
+            str::from_utf8_unchecked(
+                &PARSE_DIAGNOSTIC_QUICK_FIX_REPLACEMENTS[second_replacement_start
+                    ..second_replacement_start + second_replacement_len],
+            )
+        };
+
+        assert_eq!(first_label, "標準 ticks-per-whole");
+        assert_eq!(first_replacement, "C96");
+        assert_eq!(second_replacement, "C:96");
     }
 
     #[test]

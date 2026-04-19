@@ -72,6 +72,12 @@ pub struct ParseFailure {
     pub related_position: Option<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickFixSuggestion {
+    pub label: String,
+    pub replacement: String,
+}
+
 impl ParseFailure {
     fn at(position: usize, error: ParseError) -> Self {
         Self {
@@ -93,6 +99,15 @@ impl ParseFailure {
         match self.error {
             ParseError::UnexpectedCharacter('\0') => self.position.min(source_len),
             _ => (self.position + 1).min(source_len),
+        }
+    }
+
+    pub fn span_end(&self, source: &str) -> usize {
+        if matches!(self.error, ParseError::UnexpectedCharacter(character) if character.is_ascii_alphabetic())
+        {
+            scan_command_like_end(source, self.position)
+        } else {
+            self.end_position(source.len())
         }
     }
 }
@@ -200,21 +215,182 @@ fn unsupported_command_hint(error: &ParseError) -> Option<String> {
         'D' => "reference spec defines D<num> as drum mode; Stage 1 has no drum-note remap yet, so keep explicit note names only",
         'T' => "reference spec defines T<num> as platform tempo; Stage 1 alternative is to use t<num> BPM tempo",
         'L' => "reference spec defines L as segno; Stage 1 alternative is to expand the repeated section with [] where possible",
-        '@' => "reference spec defines @<num> as instrument select; Stage 1 uses a fixed sine voice, so remove @<num> for now",
-        '%' => "reference notes %<num> is platform-specific in ctrmml; Stage 1 has no PLATFORM event yet, so omit it for now",
-        '_' => "reference spec defines _<num>, __<num>, _{...} for transpose/key signature; Stage 1 has no transpose layer yet",
-        '\\' => "reference spec defines echo commands \\=<delay>,<volume> and \\<duration>; Stage 1 alternative is to write the echoed notes explicitly",
-        '\'' => "reference spec treats single-quoted text as platform command; Stage 1 has no platform command lane yet",
         'n' => "direct note-number style is not implemented in this parser; Stage 1 alternative is to rewrite it with o<num> and cdefgab",
         's' => "reference state rules define s<ticks> as shuffle; Stage 1 alternative is to rewrite timing with explicit :ticks lengths",
         'x' => "this looks like a custom or extended command; compare it against _reference/mml_spec/commands.md and keep to Stage 1 core commands first",
         _ => "compare this command against _reference/mml_spec/commands.md; supported Stage 1 core commands are t l o C Q q R and notes cdefgab/r",
     };
+    let example = unsupported_command_example_hint(*character);
 
-    Some(format!(
-        "possibly unsupported command '{}'; {}",
-        character, suggestion
-    ))
+    Some(match example {
+        Some(example) => format!(
+            "possibly unsupported command '{}'; {}; try rewriting it like: {}",
+            character, suggestion, example
+        ),
+        None => format!(
+            "possibly unsupported command '{}'; {}",
+            character, suggestion
+        ),
+    })
+}
+
+fn unsupported_command_example_hint(character: char) -> Option<&'static str> {
+    match character {
+        'v' | 'V' => Some("o4 l8 c d e f"),
+        'p' | 'P' => Some("o4 l8 c d e g"),
+        'k' | 'K' => Some("o4 cdefgab>c"),
+        'E' => Some("q3 o4 l8 c d e f"),
+        'M' => Some("o4 l16 c d e f g"),
+        'G' => Some("o4 l16 c~d:3 e"),
+        'D' => Some("o4 l8 c r c r"),
+        'T' => Some("t120 o4 l8 cdef"),
+        'L' => Some("[cdef]2 g"),
+        'n' => Some("o4 l8 c d e f"),
+        's' => Some("l8 c:10 d:14 e:10 f:14"),
+        _ => None,
+    }
+}
+
+pub fn parse_failure_quick_fixes(source: &str, failure: &ParseFailure) -> Vec<QuickFixSuggestion> {
+    match failure.error {
+        ParseError::UnexpectedCharacter(character) if character.is_ascii_alphabetic() => {
+            unsupported_command_quick_fixes(character)
+        }
+        ParseError::MissingParameter(command) => missing_parameter_quick_fixes(command),
+        _ => {
+            let _ = source;
+            Vec::new()
+        }
+    }
+}
+
+fn unsupported_command_quick_fixes(character: char) -> Vec<QuickFixSuggestion> {
+    let mut suggestions = Vec::new();
+
+    if let Some(example) = unsupported_command_example_hint(character) {
+        suggestions.push(QuickFixSuggestion {
+            label: "仕様に近い最小例".to_string(),
+            replacement: example.to_string(),
+        });
+    }
+
+    let alternative = match character {
+        'v' | 'V' => Some(("音量指定を外して確認", "o4 l8 c e g > c")),
+        'p' | 'P' => Some(("パン指定を外して確認", "o4 l8 c d e g")),
+        'k' | 'K' => Some(("移調なしの音列へ寄せる", "o4 cdefgab>c")),
+        'E' => Some(("q で発音長だけ近づける", "q3 o4 l8 c d e f")),
+        'M' => Some(("音高変化を明示音符へ展開", "o4 l16 c d e f g")),
+        'G' => Some(("短い経過音で近似する", "o4 l16 c d e")),
+        'D' => Some(("通常ノート列へ置き換える", "o4 l8 c r c r")),
+        'T' => Some(("小文字 t の BPM へ寄せる", "t120 o4 l8 cdef")),
+        'L' => Some(("セクションを展開型ループへ寄せる", "[cdef]2 g")),
+        'n' => Some(("音名ベースへ書き換える", "o4 l8 c d e f")),
+        's' => Some(("tick 長を直接書く", "l8 c:10 d:14 e:10 f:14")),
+        _ => None,
+    };
+
+    if let Some((label, replacement)) = alternative {
+        let replacement = replacement.to_string();
+        if !suggestions.iter().any(|entry| entry.replacement == replacement) {
+            suggestions.push(QuickFixSuggestion {
+                label: label.to_string(),
+                replacement,
+            });
+        }
+    }
+
+    if suggestions.is_empty() {
+        suggestions.push(QuickFixSuggestion {
+            label: "最小の音列へ置換".to_string(),
+            replacement: "o4 l8 c d e f".to_string(),
+        });
+    }
+
+    suggestions
+}
+
+fn missing_parameter_quick_fixes(command: char) -> Vec<QuickFixSuggestion> {
+    match command {
+        't' => vec![
+            QuickFixSuggestion {
+                label: "標準テンポ".to_string(),
+                replacement: "t120".to_string(),
+            },
+            QuickFixSuggestion {
+                label: "やや速め".to_string(),
+                replacement: "t150".to_string(),
+            },
+        ],
+        'o' => vec![
+            QuickFixSuggestion {
+                label: "標準オクターブ".to_string(),
+                replacement: "o4".to_string(),
+            },
+            QuickFixSuggestion {
+                label: "1オクターブ上".to_string(),
+                replacement: "o5".to_string(),
+            },
+        ],
+        'l' => vec![
+            QuickFixSuggestion {
+                label: "8分音符基準".to_string(),
+                replacement: "l8".to_string(),
+            },
+            QuickFixSuggestion {
+                label: "tick 直指定".to_string(),
+                replacement: "l:12".to_string(),
+            },
+        ],
+        'C' => vec![
+            QuickFixSuggestion {
+                label: "標準 ticks-per-whole".to_string(),
+                replacement: "C96".to_string(),
+            },
+            QuickFixSuggestion {
+                label: "tick 形式".to_string(),
+                replacement: "C:96".to_string(),
+            },
+        ],
+        'Q' => vec![
+            QuickFixSuggestion {
+                label: "後ろ詰め弱め".to_string(),
+                replacement: "Q6".to_string(),
+            },
+            QuickFixSuggestion {
+                label: "tick 形式".to_string(),
+                replacement: "Q:6".to_string(),
+            },
+        ],
+        'q' => vec![
+            QuickFixSuggestion {
+                label: "ゲート 3/8".to_string(),
+                replacement: "q3".to_string(),
+            },
+            QuickFixSuggestion {
+                label: "tick 形式".to_string(),
+                replacement: "q:3".to_string(),
+            },
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn scan_command_like_end(source: &str, start: usize) -> usize {
+    let bytes = source.as_bytes();
+    let mut index = start;
+
+    while let Some(byte) = peek(bytes, index) {
+        if byte.is_ascii_alphanumeric()
+            || matches!(byte, b'+' | b'-' | b':' | b'=' | b',' | b'{' | b'}' | b'_')
+        {
+            index += 1;
+            continue;
+        }
+
+        break;
+    }
+
+    index.max(start + 1).min(source.len())
 }
 
 fn expected_parameter_hint(error: &ParseError) -> Option<String> {
@@ -1199,6 +1375,8 @@ mod tests {
         assert!(message.contains("unexpected character 'v'"));
         assert!(message.contains("possibly unsupported command 'v'"));
         assert!(message.contains("v<num> as coarse volume"));
+        assert!(message.contains("try rewriting it like:"));
+        assert!(message.contains("o4 l8 c d e f"));
     }
 
     #[test]
@@ -1219,6 +1397,26 @@ mod tests {
             .expect("parser error");
 
         assert_eq!(parser_error.related_position, Some(2));
+    }
+
+    #[test]
+    fn returns_multiple_quick_fixes_for_missing_parameter() {
+        let diagnostic = ParseFailure::at(3, ParseError::MissingParameter('C'));
+        let fixes = parse_failure_quick_fixes("o4 C c", &diagnostic);
+
+        assert_eq!(fixes.len(), 2);
+        assert_eq!(fixes[0].replacement, "C96");
+        assert_eq!(fixes[1].replacement, "C:96");
+    }
+
+    #[test]
+    fn returns_multiple_quick_fixes_for_unsupported_command() {
+        let diagnostic = ParseFailure::at(3, ParseError::UnexpectedCharacter('v'));
+        let fixes = parse_failure_quick_fixes("o4 v10", &diagnostic);
+
+        assert!(fixes.len() >= 2);
+        assert_eq!(fixes[0].label, "仕様に近い最小例");
+        assert!(fixes.iter().any(|entry| entry.replacement == "o4 l8 c d e f"));
     }
 
     #[test]
