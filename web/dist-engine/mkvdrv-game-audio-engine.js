@@ -7,7 +7,12 @@ const a = {
   noiseOff: 6,
   envelopeSelect: 7,
   pan: 8,
-  pitchEnvelopeSelect: 9
+  pitchEnvelopeSelect: 9,
+  ayHardwareEnvelopeShape: 10,
+  ayHardwareEnvelopePeriod: 11,
+  ayHardwareEnvelopeEnable: 12,
+  ayMixerToneMask: 13,
+  ayMixerNoiseMask: 14
 }, r = (t) => {
   const e = new Uint32Array(t.events.length * 5);
   return t.events.forEach((o, i) => {
@@ -29,7 +34,7 @@ const a = {
   "./mkvdrv-processor.worklet.js",
   import.meta.url
 ).href;
-class h {
+class c {
   audioContext;
   workletNode;
   currentSong;
@@ -40,7 +45,7 @@ class h {
   noteFrequencies;
   initialFrequency;
   constructor(e) {
-    this.initialFrequency = e?.initialFrequency ?? 440, this.wavetable = u(e?.wavetableSize ?? 2048), this.noteFrequencies = c();
+    this.initialFrequency = e?.initialFrequency ?? 440, this.wavetable = u(e?.wavetableSize ?? 2048), this.noteFrequencies = d();
   }
   async initialize() {
     this.audioContext || (this.audioContext = new AudioContext(), await this.audioContext.audioWorklet.addModule(l)), this.workletNode || (this.workletNode = new AudioWorkletNode(
@@ -114,12 +119,12 @@ const u = (t) => {
   for (let o = 0; o < e; o += 1)
     s[o] = Math.sin(o / e * Math.PI * 2);
   return s;
-}, c = () => {
+}, d = () => {
   const t = new Float32Array(128);
   for (let e = 0; e < t.length; e += 1)
     t[e] = 440 * 2 ** ((e - 69) / 12);
   return t;
 };
 export {
-  h as MkvdrvGameAudioEngine
+  c as MkvdrvGameAudioEngine
 };

@@ -458,6 +458,117 @@ button {
   overflow-x: auto;
 }
 
+.trace-panel {
+  width: min(100%, 960px);
+  margin-top: 8px;
+  padding: 16px 18px;
+  border: 1px solid rgba(107, 74, 36, 0.14);
+  border-radius: 18px;
+  background: rgba(255, 251, 245, 0.78);
+}
+
+.trace-panel-header {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.trace-panel-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: #5f3414;
+}
+
+.trace-panel-header p {
+  margin: 0;
+  color: #6b5847;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.trace-table-shell {
+  overflow-x: auto;
+  border-radius: 14px;
+  background: rgba(255, 249, 242, 0.92);
+  border: 1px solid rgba(107, 74, 36, 0.12);
+}
+
+.trace-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  font: 0.9rem/1.55 "SFMono-Regular", "Cascadia Code", monospace;
+  color: #332316;
+}
+
+.trace-table th,
+.trace-table td {
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid rgba(107, 74, 36, 0.1);
+}
+
+.trace-table thead th {
+  position: sticky;
+  top: 0;
+  background: rgba(243, 232, 215, 0.96);
+  color: #6f431d;
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.trace-table tbody tr:nth-child(odd) {
+  background: rgba(255, 252, 247, 0.88);
+}
+
+.trace-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.trace-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.7rem;
+  padding: 0.1rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.trace-badge-kind-direct {
+  background: rgba(23, 113, 89, 0.14);
+  color: #155f4a;
+}
+
+.trace-badge-kind-derived {
+  background: rgba(41, 94, 170, 0.14);
+  color: #214f90;
+}
+
+.trace-badge-reset-none {
+  background: rgba(123, 106, 88, 0.14);
+  color: #6f5d4f;
+}
+
+.trace-badge-reset-mode {
+  background: rgba(181, 93, 31, 0.18);
+  color: #8b4718;
+}
+
+.trace-badge-reset-source {
+  background: rgba(143, 78, 23, 0.18);
+  color: #7a4215;
+}
+
+.trace-badge-reset-mode\+source {
+  background: rgba(195, 67, 28, 0.18);
+  color: #9a3214;
+}
+
 ul {
   margin: 0;
   padding-left: 18px;
@@ -498,5 +609,9 @@ code {
 
   .mml-quick-fix-columns {
     grid-template-columns: 1fr;
+  }
+
+  .trace-panel {
+    padding: 14px;
   }
 }

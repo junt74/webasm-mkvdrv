@@ -13,7 +13,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "precheck": "npm run build:wasm",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test:engine": "node --test --experimental-strip-types src/chips/sn76489-core.test.ts"
   },
   "dependencies": {},
   "devDependencies": {

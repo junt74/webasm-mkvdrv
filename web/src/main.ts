@@ -57,6 +57,15 @@ app.innerHTML = `
               <option value="scale">Scale Walk</option>
               <option value="channels">Channel Split</option>
               <option value="noise">Noise Mode</option>
+              <option value="sn-noise-compare">SN76489 Noise Compare</option>
+              <option value="sn-write-order-check">SN76489 Write Order</option>
+              <option value="sn-rhythm">SN76489 Rhythm</option>
+              <option value="sn-full-mix">SN76489 Full Mix</option>
+              <option value="preset-envelope">Preset Envelope Check</option>
+              <option value="ay-hardware-envelope">AY Hardware Envelope</option>
+              <option value="ay-hardware-envelope-focus">AY HW Env Focus</option>
+              <option value="ay-hardware-envelope-musical">AY HW Env Musical</option>
+              <option value="ay-mixer-check">AY Mixer Check</option>
               <option value="envelope">Envelope Shape</option>
               <option value="articulation">Articulation Check</option>
               <option value="branch">Branch Selection</option>
@@ -64,22 +73,22 @@ app.innerHTML = `
             </select>
           </label>
           <div class="control">
-            <span>Envelope Shortcut</span>
+            <span>プリセットエンベロープ</span>
             <div class="inline-control-row">
               <select id="envelope-shortcut" class="sample-select">
-                <option value="">Off</option>
-                <option value="S1">S1 Gate Full</option>
-                <option value="S2">S2 Gate Soft</option>
-                <option value="S3">S3 Attack Fast</option>
-                <option value="S4">S4 Attack Slow</option>
-                <option value="S5">S5 Decay Short</option>
-                <option value="S6">S6 Decay Long</option>
-                <option value="S7">S7 Decay Hold</option>
-                <option value="S8">S8 Dip Return Fast</option>
-                <option value="S9">S9 Dip Return Wide</option>
+                <option value="">解除</option>
+                <option value="S1">S1 単純ゲート</option>
+                <option value="S2">S2 やわらかいゲート</option>
+                <option value="S3">S3 速い立ち上がり</option>
+                <option value="S4">S4 遅い立ち上がり</option>
+                <option value="S5">S5 短い減衰</option>
+                <option value="S6">S6 長い減衰</option>
+                <option value="S7">S7 減衰後ホールド</option>
+                <option value="S8">S8 素早いディップ復帰</option>
+                <option value="S9">S9 深めのディップ復帰</option>
               </select>
               <button id="insert-envelope-shortcut" class="secondary-button" type="button">
-                Insert
+                挿入
               </button>
             </div>
             <small class="control-note">
@@ -135,6 +144,27 @@ app.innerHTML = `
           <pre id="mml-error-context" class="mml-error-context"></pre>
         </div>
         <pre id="log-output" class="log">Booting MKVDRV-Wasm...</pre>
+        <section id="sn-trace-panel" class="trace-panel" hidden>
+          <div class="trace-panel-header">
+            <h3>SN76489 Write Trace</h3>
+            <p>tone/noise/volume の register write を表形式で確認できます。</p>
+          </div>
+          <div class="trace-table-shell">
+            <table class="trace-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Target</th>
+                  <th>Type</th>
+                  <th>Reset</th>
+                  <th>Write</th>
+                  <th>Detail</th>
+                </tr>
+              </thead>
+              <tbody id="sn-trace-body"></tbody>
+            </table>
+          </div>
+        </section>
       </div>
     </section>
 
@@ -249,43 +279,114 @@ const MML_SAMPLES = {
   arp: {
     label: "Arpeggio Demo",
     source: "t124 o4 l16 ceg>c<g e c r dfa>b<a f d r",
-    branchIndex: 0
+    branchIndex: 0,
+    chipModel: "sn76489"
   },
   scale: {
     label: "Scale Walk",
     source: "t132 o4 l8 cdefgab>c<bagfedc",
-    branchIndex: 0
+    branchIndex: 0,
+    chipModel: "sn76489"
   },
   channels: {
     label: "Channel Split",
     source: "A t132 o4 l8 c>c<g e\nB o3 l8 c g c g\nC o2 l4 c r\nN l8 c r c r",
-    branchIndex: 0
+    branchIndex: 0,
+    chipModel: "sn76489"
   },
   noise: {
     label: "Noise Mode",
     source: "A t132 o4 l8 c e g e\nN l8 v10 w1 c r c r\nN l8 v10 w0 c r c r",
-    branchIndex: 0
+    branchIndex: 0,
+    chipModel: "sn76489"
+  },
+  "sn-noise-compare": {
+    label: "SN76489 Noise Compare",
+    source:
+      "t132\nN l8 v10 w0 o5 c r c r\nN l8 v10 w1 o5 c r c r\nN l16 v10 w0 o5 c c c c",
+    branchIndex: 0,
+    chipModel: "sn76489"
+  },
+  "sn-write-order-check": {
+    label: "SN76489 Write Order",
+    source:
+      "t140\nA o6 l16 v12 c c c c\nC o4 l8 v11 c r g r\nN o5 l16 v10 w1 c c r c\nN o5 l16 v10 w0 c c r c\nC o3 l8 c r > c r\nN o5 l16 v10 w1 c r c r",
+    branchIndex: 0,
+    chipModel: "sn76489"
+  },
+  "sn-rhythm": {
+    label: "SN76489 Rhythm",
+    source:
+      "t144\nA o5 l16 c r g r c r g r\nB o4 l8 c r c r\nN o5 l16 v10 w1 c r c c r c r",
+    branchIndex: 0,
+    chipModel: "sn76489"
+  },
+  "sn-full-mix": {
+    label: "SN76489 Full Mix",
+    source:
+      "A t132 o5 l8 c>c<g e\nB o4 l8 c g c g\nC o3 l4 c r\nN o5 l8 v9 w1 c r g r",
+    branchIndex: 0,
+    chipModel: "sn76489"
+  },
+  "preset-envelope": {
+    label: "Preset Envelope Check",
+    source:
+      "A t132 o5 l8 S1 c S2 d S3 e S4 f S5 g S6 a S7 b > S8 c < S9 b",
+    branchIndex: 0,
+    chipModel: "sn76489"
+  },
+  "ay-hardware-envelope": {
+    label: "AY Hardware Envelope",
+    source:
+      "A t108 o5 l1 v15 EP256 EH0 EE1 c EE0 r2 EP256 EH1 EE1 c EE0 r2 EP256 EH2 EE1 c EE0 r2 EP256 EH3 EE1 c EE0 r2\nA EP256 EH4 EE1 c EE0 r2 EP256 EH5 EE1 c EE0 r2 EP256 EH6 EE1 c EE0 r2 EP256 EH7 EE1 c EE0 r2\nA EP256 EH8 EE1 c EE0 r2 EP256 EH9 EE1 c EE0 r2 EP256 EH10 EE1 c EE0 r2 EP256 EH11 EE1 c EE0 r2\nA EP256 EH12 EE1 c EE0 r2 EP256 EH13 EE1 c EE0 r2 EP256 EH14 EE1 c EE0 r2 EP256 EH15 EE1 c EE0 r2",
+    branchIndex: 0,
+    chipModel: "ay38910"
+  },
+  "ay-hardware-envelope-focus": {
+    label: "AY HW Env Focus",
+    source:
+      "A t108 o5 l1 v15 EP256 EH9 EE1 c EE0 r2 EP256 EH10 EE1 c EE0 r2\nA EP256 EH13 EE1 c EE0 r2 EP256 EH14 EE1 c EE0 r2\nA EP512 EH10 EE1 c EE0 r2 EP512 EH14 EE1 c EE0 r2",
+    branchIndex: 0,
+    chipModel: "ay38910"
+  },
+  "ay-hardware-envelope-musical": {
+    label: "AY HW Env Musical",
+    source:
+      "A t132 o5 l8 v15 EP24 EH10 EE1 c2 EE0 r4 EP18 EH14 EE1 g2 EE0 r4\nA EP20 EH9 EE1 e2 EE0 r4 EP16 EH13 EE1 c2 EE0 r4",
+    branchIndex: 0,
+    chipModel: "ay38910"
+  },
+  "ay-mixer-check": {
+    label: "AY Mixer Check",
+    source:
+      "A t132 o5 l8 MT7 MN1 c c c c\nB o4 l8 p1 c c c c\nC o3 l8 p2 c c c c\nN v12 w1 c r c r",
+    branchIndex: 0,
+    chipModel: "ay38910"
   },
   envelope: {
     label: "Envelope Shape",
     source:
       "@E1={1,0,2,4,6,8,10,12,14}\n@E2={2,0,4,8,12,255,1}\nA t132 o4 l8 @E1 v14 c e g > c\nB o3 l8 @E2 v11 c c g g\nN l8 @E2 v9 w1 c r c r",
-    branchIndex: 0
+    branchIndex: 0,
+    chipModel: "sn76489"
   },
   articulation: {
     label: "Articulation Check",
     source: "t120 o4 l8 q3 c d e f Q6 g a b > c R:2 ~b:3",
-    branchIndex: 0
+    branchIndex: 0,
+    chipModel: "sn76489"
   },
   branch: {
     label: "Branch Selection",
     source: "t128 o4 l8 c{d/e/f}g {c/e/g} r",
-    branchIndex: 1
+    branchIndex: 1,
+    chipModel: "sn76489"
   },
   error: {
     label: "Error Example",
     source: "t128 o4 l8 c { d / e / } g",
-    branchIndex: 0
+    branchIndex: 0,
+    chipModel: "sn76489"
   }
 } as const;
 type SampleKey = keyof typeof MML_SAMPLES;
@@ -347,13 +448,84 @@ const mmlQuickFixCancel = document.querySelector<HTMLButtonElement>(
 const mmlErrorContext =
   document.querySelector<HTMLElement>("#mml-error-context");
 const logOutput = document.querySelector<HTMLElement>("#log-output");
+const snTracePanel = document.querySelector<HTMLElement>("#sn-trace-panel");
+const snTraceBody = document.querySelector<HTMLElement>("#sn-trace-body");
 
 const updateLog = (message: string) => {
   if (!logOutput) {
     return;
   }
 
-  logOutput.textContent = message;
+  const traceMarker = "\nSN write trace:\n";
+  const traceStart = message.indexOf(traceMarker);
+
+  if (traceStart === -1) {
+    logOutput.textContent = message;
+    if (snTracePanel) {
+      snTracePanel.hidden = true;
+    }
+    if (snTraceBody) {
+      snTraceBody.innerHTML = "";
+    }
+    return;
+  }
+
+  const baseLog = message.slice(0, traceStart).trimEnd();
+  const traceText = message.slice(traceStart + traceMarker.length).trim();
+  logOutput.textContent = baseLog;
+
+  if (!snTracePanel || !snTraceBody) {
+    return;
+  }
+
+  const lines = traceText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  const rows = lines.map((line) => {
+    const match = line.match(
+      /^#(\d+)\s+\|\s+([^|]+)\|\s+kind=([^|]+)\|\s+reset=([^|]+)\|\s+write=([^|]+)\|\s+detail=(.*)$/
+    );
+    if (!match) {
+      return {
+        index: "…",
+        target: "note",
+        updateKind: "note",
+        resetReason: "",
+        write: line,
+        detail: ""
+      };
+    }
+
+    const [, index, target, updateKind, resetReason, write, detail] = match;
+    return {
+      index,
+      target: target.trim(),
+      updateKind: updateKind.trim(),
+      resetReason: resetReason.trim(),
+      write: write.trim(),
+      detail: detail.trim()
+    };
+  });
+
+  snTraceBody.innerHTML = rows
+    .map(
+      (row) =>
+        `<tr><td>${escapeHtml(row.index)}</td><td>${escapeHtml(
+          row.target
+        )}</td><td><span class="trace-badge trace-badge-kind trace-badge-kind-${escapeHtmlAttribute(
+          row.updateKind
+        )}">${escapeHtml(row.updateKind)}</span></td><td><span class="trace-badge trace-badge-reset trace-badge-reset-${escapeHtmlAttribute(
+          row.resetReason || "none"
+        )}">${escapeHtml(row.resetReason || "none")}</span></td><td>${escapeHtml(
+          row.write
+        )}</td><td>${escapeHtml(
+          row.detail
+        )}</td></tr>`
+    )
+    .join("");
+  snTracePanel.hidden = rows.length === 0;
 };
 
 const clearMmlError = () => {
@@ -431,7 +603,9 @@ const readUtf8 = (
 const loadRuntime = async (): Promise<WasmRuntime> => {
   if (!runtimePromise) {
     runtimePromise = (async () => {
-      const response = await fetch("/wasm/mkvdrv_wasm_core.wasm");
+      const response = await fetch("/wasm/mkvdrv_wasm_core.wasm", {
+        cache: "no-store"
+      });
       const { instance } = await WebAssembly.instantiateStreaming(response, {});
       const exports = instance.exports as unknown as MkvdrvWasmExports;
 
@@ -1107,6 +1281,10 @@ const applySample = (sampleKey: SampleKey) => {
     branchIndexInput.value = String(sample.branchIndex);
   }
 
+  if (chipModelSelect) {
+    chipModelSelect.value = sample.chipModel;
+  }
+
   clearMmlError();
   updateActiveLineRange();
   updateBranchLabel();
@@ -1375,6 +1553,16 @@ const configureNode = (
   });
 };
 
+const stopPlayback = async (): Promise<boolean> => {
+  if (!workletNode) {
+    return false;
+  }
+
+  workletNode.port.postMessage({ type: "stop" });
+  await audioContext?.suspend();
+  return true;
+};
+
 const downloadTextFile = (
   filename: string,
   contents: string,
@@ -1442,6 +1630,7 @@ sequenceButton?.addEventListener("click", async () => {
       ticksPerBeat: runtime.sequenceTicksPerBeat,
       loopCount: runtime.sequenceLoopCount,
       tailTicks: runtime.sequenceTailTicks,
+      chipModel: currentChipModel(),
       sequenceEvents: runtime.sequenceEvents,
       eventStride: runtime.sequenceEventStride,
       envelopes: runtime.envelopes,
@@ -1485,6 +1674,7 @@ mmlButton?.addEventListener("click", async () => {
       ticksPerBeat,
       loopCount,
       tailTicks,
+      chipModel: currentChipModel(),
       sequenceEvents,
       eventStride: runtime.sequenceEventStride,
       envelopes,
@@ -1518,13 +1708,13 @@ exportButton?.addEventListener("click", async () => {
 });
 
 stopButton?.addEventListener("click", async () => {
-  if (!workletNode) {
+  const stopped = await stopPlayback();
+
+  if (!stopped) {
     updateLog("Playback is not running.");
     return;
   }
 
-  workletNode.port.postMessage({ type: "stop" });
-  await audioContext?.suspend();
   updateLog("Playback stopped.");
 });
 
@@ -1550,9 +1740,12 @@ chipModelSelect?.addEventListener("change", async () => {
   try {
     const runtime = await loadRuntime();
     const node = await ensureAudioNode();
+    const stopped = await stopPlayback();
     configureNode(node, runtime);
     updateLog(
-      `${runtime.message}\nRenderer: ${currentRenderEngine()}\nChip model switched to ${currentChipModel()}.`
+      `${runtime.message}\nRenderer: ${currentRenderEngine()}\nChip model switched to ${currentChipModel()}.${
+        stopped ? "\nPlayback was stopped automatically." : ""
+      }`
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -1602,12 +1795,12 @@ sampleSelect?.addEventListener("change", () => {
 insertEnvelopeShortcutButton?.addEventListener("click", () => {
   const shortcut = envelopeShortcutSelect?.value ?? "";
   if (!shortcut) {
-    updateLog("Envelope Shortcut is Off. Select S1-S9 to insert a preset.");
+    updateLog("プリセットエンベロープは解除中です。S1-S9 を選ぶと挿入できます。");
     return;
   }
 
   insertTextAtCursor(`${shortcut} `);
-  updateLog(`Inserted envelope shortcut: ${shortcut}`);
+  updateLog(`プリセットエンベロープを挿入しました: ${shortcut}`);
 });
 
 void boot();

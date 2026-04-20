@@ -10,12 +10,19 @@ export type PsgNoiseFrequencyMode =
       kind: "tone2";
     };
 
+export type AyChannelVolumeState = {
+  level: number;
+  usesHardwareEnvelope: boolean;
+};
+
 export type PsgChipCore = {
   readonly chipModel: SoundChipModel;
   decodeEnvelopeGain(level: number): number;
   decodeAmplitude(volume: number): number;
   toneOutputLevel(): number;
   noiseOutputLevel(): number;
+  toneClockStep(sampleRate: number): number;
+  noiseClockStep(sampleRate: number): number;
   tonePeriodFromFrequency(frequency: number): number;
   toneFrequencyFromPeriod(period: number): number;
   noisePeriodFromFrequency(frequency: number): number;

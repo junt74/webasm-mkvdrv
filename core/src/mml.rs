@@ -20,6 +20,11 @@ pub const EVENT_NOISE_OFF: u32 = 6;
 pub const EVENT_ENVELOPE_SELECT: u32 = 7;
 pub const EVENT_PAN: u32 = 8;
 pub const EVENT_PITCH_ENVELOPE_SELECT: u32 = 9;
+pub const EVENT_AY_HARDWARE_ENVELOPE_SHAPE: u32 = 10;
+pub const EVENT_AY_HARDWARE_ENVELOPE_PERIOD: u32 = 11;
+pub const EVENT_AY_HARDWARE_ENVELOPE_ENABLE: u32 = 12;
+pub const EVENT_AY_MIXER_TONE_MASK: u32 = 13;
+pub const EVENT_AY_MIXER_NOISE_MASK: u32 = 14;
 pub const PSG_DEFAULT_CHANNEL: u32 = 0;
 pub const PSG_DEFAULT_VOLUME: u32 = 12;
 pub const PSG_DEFAULT_PAN: u32 = 3;
@@ -76,6 +81,11 @@ pub enum ParseError {
     InvalidEnvelopeSelection,
     InvalidPitchEnvelopeDefinition,
     InvalidPitchEnvelopeSelection,
+    InvalidAyHardwareEnvelopeShape,
+    InvalidAyHardwareEnvelopePeriod,
+    InvalidAyHardwareEnvelopeEnable,
+    InvalidAyMixerToneMask,
+    InvalidAyMixerNoiseMask,
     InvalidLoopCount,
     InvalidTie,
     InvalidSlur,
@@ -105,6 +115,17 @@ impl fmt::Display for ParseError {
             Self::InvalidEnvelopeSelection => write!(f, "invalid envelope selection"),
             Self::InvalidPitchEnvelopeDefinition => write!(f, "invalid pitch envelope definition"),
             Self::InvalidPitchEnvelopeSelection => write!(f, "invalid pitch envelope selection"),
+            Self::InvalidAyHardwareEnvelopeShape => {
+                write!(f, "invalid AY hardware envelope shape")
+            }
+            Self::InvalidAyHardwareEnvelopePeriod => {
+                write!(f, "invalid AY hardware envelope period")
+            }
+            Self::InvalidAyHardwareEnvelopeEnable => {
+                write!(f, "invalid AY hardware envelope enable")
+            }
+            Self::InvalidAyMixerToneMask => write!(f, "invalid AY mixer tone mask"),
+            Self::InvalidAyMixerNoiseMask => write!(f, "invalid AY mixer noise mask"),
             Self::InvalidLoopCount => write!(f, "invalid loop count"),
             Self::InvalidTie => write!(f, "invalid '^' target"),
             Self::InvalidSlur => write!(f, "invalid '&' target"),
@@ -142,6 +163,11 @@ struct TrackState {
     noise_mode: u32,
     envelope_id: u32,
     pitch_envelope_id: u32,
+    ay_hardware_envelope_shape: u32,
+    ay_hardware_envelope_period: u32,
+    ay_hardware_envelope_enabled: bool,
+    ay_mixer_tone_mask: u32,
+    ay_mixer_noise_mask: u32,
 }
 
 impl Default for TrackState {
@@ -158,6 +184,11 @@ impl Default for TrackState {
             noise_mode: PSG_NOISE_MODE_WHITE,
             envelope_id: 0,
             pitch_envelope_id: 0,
+            ay_hardware_envelope_shape: 9,
+            ay_hardware_envelope_period: 512,
+            ay_hardware_envelope_enabled: false,
+            ay_mixer_tone_mask: 0b111,
+            ay_mixer_noise_mask: 0b111,
         }
     }
 }
@@ -707,6 +738,16 @@ impl Parser {
                     self.parse_at_command(bytes, &mut index)
                         .map_err(|error| ParseFailure::at(position, error))?;
                 }
+                b'E' => {
+                    index += 1;
+                    self.parse_ay_hardware_envelope_command(bytes, &mut index)
+                        .map_err(|error| ParseFailure::at(position, error))?;
+                }
+                b'M' => {
+                    index += 1;
+                    self.parse_ay_mixer_command(bytes, &mut index)
+                        .map_err(|error| ParseFailure::at(position, error))?;
+                }
                 b't' => {
                     index += 1;
                     let tempo = read_required_number(bytes, &mut index, 't')
@@ -1073,12 +1114,7 @@ impl Parser {
                     return Ok(());
                 }
 
-                for channel in self.active_channels.clone() {
-                    self.track_state_mut(channel).envelope_id = envelope_id;
-                    self.push_event_with_meta(EVENT_ENVELOPE_SELECT, envelope_id, 0, channel, 0)
-                        .map_err(|_| ParseError::TooManyEvents)?;
-                }
-                Ok(())
+                self.apply_envelope_selection(envelope_id)
             }
             Some(b'p') => {
                 *index += 1;
@@ -1102,6 +1138,113 @@ impl Parser {
         }
     }
 
+    fn parse_ay_hardware_envelope_command(
+        &mut self,
+        bytes: &[u8],
+        index: &mut usize,
+    ) -> Result<(), ParseError> {
+        match peek(bytes, *index) {
+            Some(b'H') => {
+                *index += 1;
+                let shape = read_required_number(bytes, index, 'H')
+                    .map_err(|_| ParseError::InvalidAyHardwareEnvelopeShape)?;
+                if shape > 15 {
+                    return Err(ParseError::InvalidAyHardwareEnvelopeShape);
+                }
+                self.for_each_active_track_state_mut(|state| {
+                    state.ay_hardware_envelope_shape = shape;
+                });
+                self.push_event_with_meta(
+                    EVENT_AY_HARDWARE_ENVELOPE_SHAPE,
+                    shape,
+                    0,
+                    self.primary_channel(),
+                    0,
+                )
+                .map_err(|_| ParseError::TooManyEvents)?;
+                Ok(())
+            }
+            Some(b'P') => {
+                *index += 1;
+                let period = read_required_number(bytes, index, 'P')
+                    .map_err(|_| ParseError::InvalidAyHardwareEnvelopePeriod)?;
+                if period == 0 {
+                    return Err(ParseError::InvalidAyHardwareEnvelopePeriod);
+                }
+                self.for_each_active_track_state_mut(|state| {
+                    state.ay_hardware_envelope_period = period;
+                });
+                self.push_event_with_meta(
+                    EVENT_AY_HARDWARE_ENVELOPE_PERIOD,
+                    period,
+                    0,
+                    self.primary_channel(),
+                    0,
+                )
+                .map_err(|_| ParseError::TooManyEvents)?;
+                Ok(())
+            }
+            Some(b'E') => {
+                *index += 1;
+                let enabled = read_required_number(bytes, index, 'E')
+                    .map_err(|_| ParseError::InvalidAyHardwareEnvelopeEnable)?;
+                if enabled > 1 {
+                    return Err(ParseError::InvalidAyHardwareEnvelopeEnable);
+                }
+                self.apply_ay_hardware_envelope_enable(enabled != 0)
+            }
+            Some(other) => Err(ParseError::UnexpectedCharacter(other as char)),
+            None => Err(ParseError::UnexpectedCharacter('\0')),
+        }
+    }
+
+    fn parse_ay_mixer_command(&mut self, bytes: &[u8], index: &mut usize) -> Result<(), ParseError> {
+        match peek(bytes, *index) {
+            Some(b'T') => {
+                *index += 1;
+                let mask = read_required_number(bytes, index, 'T')
+                    .map_err(|_| ParseError::InvalidAyMixerToneMask)?;
+                if mask > 0b111 {
+                    return Err(ParseError::InvalidAyMixerToneMask);
+                }
+                self.for_each_active_track_state_mut(|state| {
+                    state.ay_mixer_tone_mask = mask;
+                });
+                self.push_event_with_meta(
+                    EVENT_AY_MIXER_TONE_MASK,
+                    mask,
+                    0,
+                    self.primary_channel(),
+                    0,
+                )
+                .map_err(|_| ParseError::TooManyEvents)?;
+                Ok(())
+            }
+            Some(b'N') => {
+                *index += 1;
+                let mask = read_required_number(bytes, index, 'N')
+                    .map_err(|_| ParseError::InvalidAyMixerNoiseMask)?;
+                if mask > 0b111 {
+                    return Err(ParseError::InvalidAyMixerNoiseMask);
+                }
+                self.for_each_active_track_state_mut(|state| {
+                    state.ay_mixer_noise_mask = mask;
+                });
+                self.push_event_with_meta(
+                    EVENT_AY_MIXER_NOISE_MASK,
+                    mask,
+                    0,
+                    self.primary_channel(),
+                    0,
+                )
+                .map_err(|_| ParseError::TooManyEvents)?;
+                Ok(())
+            }
+            Some(other) => Err(ParseError::UnexpectedCharacter(other as char)),
+            None => Err(ParseError::UnexpectedCharacter('\0')),
+        }
+    }
+
     fn select_preset_envelope(&mut self, preset: u32) -> Result<(), ParseError> {
         if preset == 0 {
             self.apply_envelope_selection(0)?;
@@ -1119,6 +1262,9 @@ impl Parser {
     fn apply_envelope_selection(&mut self, envelope_id: u32) -> Result<(), ParseError> {
         for channel in self.active_channels.clone() {
             self.track_state_mut(channel).envelope_id = envelope_id;
+            self.track_state_mut(channel).ay_hardware_envelope_enabled = false;
+            self.push_event_with_meta(EVENT_AY_HARDWARE_ENVELOPE_ENABLE, 0, 0, channel, 0)
+                .map_err(|_| ParseError::TooManyEvents)?;
             self.push_event_with_meta(EVENT_ENVELOPE_SELECT, envelope_id, 0, channel, 0)
                 .map_err(|_| ParseError::TooManyEvents)?;
         }
@@ -1139,6 +1285,21 @@ impl Parser {
             self.track_state_mut(channel).pitch_envelope_id = envelope_id;
             self.push_event_with_meta(EVENT_PITCH_ENVELOPE_SELECT, envelope_id, 0, channel, 0)
                 .map_err(|_| ParseError::TooManyEvents)?;
+        }
+        Ok(())
+    }
+
+    fn apply_ay_hardware_envelope_enable(&mut self, enabled: bool) -> Result<(), ParseError> {
+        for channel in self.active_channels.clone() {
+            self.track_state_mut(channel).ay_hardware_envelope_enabled = enabled;
+            self.push_event_with_meta(
+                EVENT_AY_HARDWARE_ENVELOPE_ENABLE,
+                if enabled { 1 } else { 0 },
+                0,
+                channel,
+                0,
+            )
+            .map_err(|_| ParseError::TooManyEvents)?;
         }
         Ok(())
     }
@@ -1968,11 +2129,13 @@ mod tests {
         assert_eq!(parsed.envelopes[0].values, vec![0, 4, 8]);
         assert_eq!(parsed.envelopes[0].loop_start, Some(1));
 
-        assert_eq!(parsed.events[0].kind, EVENT_ENVELOPE_SELECT);
-        assert_eq!(parsed.events[0].value, 1);
-        assert_eq!(parsed.events[0].channel, 0);
-        assert_eq!(parsed.events[1].kind, EVENT_VOLUME);
-        assert_eq!(parsed.events[2].kind, EVENT_NOTE_ON);
+        assert_eq!(parsed.events[0].kind, EVENT_AY_HARDWARE_ENVELOPE_ENABLE);
+        assert_eq!(parsed.events[0].value, 0);
+        assert_eq!(parsed.events[1].kind, EVENT_ENVELOPE_SELECT);
+        assert_eq!(parsed.events[1].value, 1);
+        assert_eq!(parsed.events[1].channel, 0);
+        assert_eq!(parsed.events[2].kind, EVENT_VOLUME);
+        assert_eq!(parsed.events[3].kind, EVENT_NOTE_ON);
     }
 
     #[test]
@@ -1991,6 +2154,55 @@ mod tests {
     }
 
     #[test]
+    fn parses_ay_hardware_envelope_commands() {
+        let parsed = parse_mml("A EP512 EH9 EE1 c", 64).expect("parse ok");
+
+        assert_eq!(parsed.events[0].kind, EVENT_AY_HARDWARE_ENVELOPE_PERIOD);
+        assert_eq!(parsed.events[0].value, 512);
+        assert_eq!(parsed.events[1].kind, EVENT_AY_HARDWARE_ENVELOPE_SHAPE);
+        assert_eq!(parsed.events[1].value, 9);
+        assert_eq!(parsed.events[2].kind, EVENT_AY_HARDWARE_ENVELOPE_ENABLE);
+        assert_eq!(parsed.events[2].value, 1);
+        assert_eq!(parsed.events[3].kind, EVENT_NOTE_ON);
+    }
+
+    #[test]
+    fn parses_ay_mixer_commands() {
+        let parsed = parse_mml("A MT5 MN1 c\nN v12 c", 64).expect("parse ok");
+
+        assert_eq!(parsed.events[0].kind, EVENT_AY_MIXER_TONE_MASK);
+        assert_eq!(parsed.events[0].value, 5);
+        assert_eq!(parsed.events[1].kind, EVENT_AY_MIXER_NOISE_MASK);
+        assert_eq!(parsed.events[1].value, 1);
+    }
+
+    #[test]
+    fn rejects_invalid_ay_mixer_noise_mask() {
+        let error = parse_mml("MN8", 64).expect_err("parse error");
+
+        assert_eq!(error.error, ParseError::InvalidAyMixerNoiseMask);
+    }
+
+    #[test]
+    fn selecting_software_envelope_disables_ay_hardware_envelope() {
+        let parsed = parse_mml("A EE1 @E1={1,0,4,8}\nA @E1 c", 64).expect("parse ok");
+
+        assert_eq!(parsed.events[0].kind, EVENT_AY_HARDWARE_ENVELOPE_ENABLE);
+        assert_eq!(parsed.events[0].value, 1);
+        assert_eq!(parsed.events[1].kind, EVENT_AY_HARDWARE_ENVELOPE_ENABLE);
+        assert_eq!(parsed.events[1].value, 0);
+        assert_eq!(parsed.events[2].kind, EVENT_ENVELOPE_SELECT);
+        assert_eq!(parsed.events[2].value, 1);
+    }
+
+    #[test]
+    fn rejects_invalid_ay_hardware_envelope_enable() {
+        let error = parse_mml("A EE2 c", 64).expect_err("parse error");
+
+        assert_eq!(error.error, ParseError::InvalidAyHardwareEnvelopeEnable);
+    }
+
+    #[test]
     fn rejects_invalid_pitch_envelope_definition() {
         let error = parse_mml("@p1={3000,0,-150,0}\nA c", 64).expect_err("parse error");
 
@@ -2006,21 +2218,27 @@ mod tests {
         assert_eq!(parsed.envelopes[0].speed, 1);
         assert_eq!(parsed.envelopes[0].values, vec![12, 8, 4, 0]);
 
-        assert_eq!(parsed.events[0].kind, EVENT_ENVELOPE_SELECT);
-        assert_eq!(parsed.events[0].value, preset_envelope_id(3));
-        assert_eq!(parsed.events[0].channel, 0);
-        assert_eq!(parsed.events[1].kind, EVENT_VOLUME);
-        assert_eq!(parsed.events[2].kind, EVENT_NOTE_ON);
+        assert_eq!(parsed.events[0].kind, EVENT_AY_HARDWARE_ENVELOPE_ENABLE);
+        assert_eq!(parsed.events[0].value, 0);
+        assert_eq!(parsed.events[1].kind, EVENT_ENVELOPE_SELECT);
+        assert_eq!(parsed.events[1].value, preset_envelope_id(3));
+        assert_eq!(parsed.events[1].channel, 0);
+        assert_eq!(parsed.events[2].kind, EVENT_VOLUME);
+        assert_eq!(parsed.events[3].kind, EVENT_NOTE_ON);
     }
 
     #[test]
     fn s0_clears_selected_envelope() {
         let parsed = parse_mml("A @E1 S0 c", 64).expect("parse ok");
 
-        assert_eq!(parsed.events[0].kind, EVENT_ENVELOPE_SELECT);
-        assert_eq!(parsed.events[0].value, 1);
+        assert_eq!(parsed.events[0].kind, EVENT_AY_HARDWARE_ENVELOPE_ENABLE);
+        assert_eq!(parsed.events[0].value, 0);
         assert_eq!(parsed.events[1].kind, EVENT_ENVELOPE_SELECT);
-        assert_eq!(parsed.events[1].value, 0);
+        assert_eq!(parsed.events[1].value, 1);
+        assert_eq!(parsed.events[2].kind, EVENT_AY_HARDWARE_ENVELOPE_ENABLE);
+        assert_eq!(parsed.events[2].value, 0);
+        assert_eq!(parsed.events[3].kind, EVENT_ENVELOPE_SELECT);
+        assert_eq!(parsed.events[3].value, 0);
     }
 
     #[test]

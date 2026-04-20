@@ -5,10 +5,11 @@ use core::str;
 use serde::Serialize;
 
 use mml::{
+    EVENT_AY_HARDWARE_ENVELOPE_ENABLE, EVENT_AY_HARDWARE_ENVELOPE_PERIOD,
+    EVENT_AY_HARDWARE_ENVELOPE_SHAPE, EVENT_AY_MIXER_NOISE_MASK, EVENT_AY_MIXER_TONE_MASK,
     EVENT_ENVELOPE_SELECT, EVENT_NOISE_OFF, EVENT_NOISE_ON, EVENT_NOTE_OFF, EVENT_NOTE_ON,
     EVENT_PAN, EVENT_PITCH_ENVELOPE_SELECT, EVENT_TEMPO, EVENT_VOLUME, EnvelopeDefinition,
-    PSG_DEFAULT_VOLUME, PSG_NOISE_MODE_WHITE, ParseFailure, PitchEnvelopeDefinition,
-    SequenceEvent,
+    PSG_DEFAULT_VOLUME, PSG_NOISE_MODE_WHITE, ParseFailure, PitchEnvelopeDefinition, SequenceEvent,
     collect_parse_diagnostics_with_context, format_parse_failure_with_context,
     parse_failure_quick_fixes, parse_mml_with_context,
 };
@@ -800,8 +801,13 @@ fn event_priority(kind: u32) -> u32 {
         EVENT_PAN => 2,
         EVENT_ENVELOPE_SELECT => 3,
         EVENT_PITCH_ENVELOPE_SELECT => 4,
-        EVENT_NOTE_OFF | EVENT_NOISE_OFF => 5,
-        EVENT_NOTE_ON | EVENT_NOISE_ON => 6,
+        EVENT_AY_HARDWARE_ENVELOPE_SHAPE => 5,
+        EVENT_AY_HARDWARE_ENVELOPE_PERIOD => 6,
+        EVENT_AY_HARDWARE_ENVELOPE_ENABLE => 7,
+        EVENT_AY_MIXER_TONE_MASK => 8,
+        EVENT_AY_MIXER_NOISE_MASK => 9,
+        EVENT_NOTE_OFF | EVENT_NOISE_OFF => 10,
+        EVENT_NOTE_ON | EVENT_NOISE_ON => 11,
         _ => 4,
     }
 }
@@ -817,6 +823,11 @@ fn event_kind_name(kind: u32) -> &'static str {
         EVENT_ENVELOPE_SELECT => "envelopeSelect",
         EVENT_PAN => "pan",
         EVENT_PITCH_ENVELOPE_SELECT => "pitchEnvelopeSelect",
+        EVENT_AY_HARDWARE_ENVELOPE_SHAPE => "ayHardwareEnvelopeShape",
+        EVENT_AY_HARDWARE_ENVELOPE_PERIOD => "ayHardwareEnvelopePeriod",
+        EVENT_AY_HARDWARE_ENVELOPE_ENABLE => "ayHardwareEnvelopeEnable",
+        EVENT_AY_MIXER_TONE_MASK => "ayMixerToneMask",
+        EVENT_AY_MIXER_NOISE_MASK => "ayMixerNoiseMask",
         _ => "unknown",
     }
 }
@@ -1068,7 +1079,7 @@ mod tests {
 
         let event_count = mkvdrv_parse_mml_from_buffer(input.len());
 
-        assert_eq!(event_count, 8);
+        assert_eq!(event_count, 9);
         assert_eq!(unsafe { SEQUENCE_EVENTS[0] }, EVENT_TEMPO);
         assert_eq!(unsafe { SEQUENCE_EVENTS[1] }, 150);
         assert_eq!(unsafe { ENVELOPE_DEFINITION_COUNT }, 1);
@@ -1087,15 +1098,20 @@ mod tests {
         assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2 + 1] }, 1);
         assert_eq!(
             unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 3] },
+            EVENT_AY_HARDWARE_ENVELOPE_ENABLE
+        );
+        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 3 + 1] }, 0);
+        assert_eq!(
+            unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 4] },
             EVENT_NOTE_ON
         );
         assert_eq!(
-            unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 3 + 1] },
+            unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 4 + 1] },
             48
         );
-        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 3 + 3] }, 0);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 4 + 3] }, 0);
         assert_eq!(
-            unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 3 + 4] },
+            unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 4 + 4] },
             PSG_DEFAULT_VOLUME
         );
     }

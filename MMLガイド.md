@@ -155,11 +155,25 @@ N l8 c r c r
   内蔵プリセットエンベロープの選択
 - `S0`
   プリセットエンベロープ解除
+- `EH<num>`
+  AY hardware envelope の shape 指定
+- `EP<num>`
+  AY hardware envelope の period 指定
+- `EE0` / `EE1`
+  AY hardware envelope の無効 / 有効
+- `MT<num>`
+  AY mixer の tone mask 指定
+- `MN<num>`
+  AY mixer の noise mask 指定
 
 `@E` と `S` の違い:
 
 - `@E` は自分で波形を定義したいとき
 - `S` は手早く音の立ち上がりや減衰を試したいとき
+- `EH` `EP` `EE` は AY-3-8910 の hardware envelope を使いたいとき
+- `MT` `MN` は AY-3-8910 の tone/noise mixer mask を切り替えたいとき
+- `S1` から `S9` の番号意味は `SN76489` / `AY-3-8910` で共通です
+- ただし実際のカーブは各チップモデルに合わせて最適化されます
 
 `@E` の書式:
 
@@ -169,6 +183,18 @@ N l8 c r c r
 - 2 要素目以降は各ステップの音量値です
 - 音量値は `0` が最大、`15` が最小です
 - つまり数値が大きいほど音は小さくなります
+
+共通役割の概要:
+
+- `S1` gate full
+- `S2` gate soft
+- `S3` attack fast
+- `S4` attack slow
+- `S5` decay short
+- `S6` decay long
+- `S7` decay hold
+- `S8` dip return fast
+- `S9` dip return wide
 
 プリセット一覧は [Sプリセットエンベロープ仕様.md](/Users/junt74/Projects/webasm/webasm-mkvdrv/Sプリセットエンベロープ仕様.md) を参照してください。
 
@@ -182,6 +208,23 @@ N l8 c r c r
 - 現行実装では `100 = 半音 1 つ分` として扱います
 
 詳細は [ピッチエンベロープ仕様.md](/Users/junt74/Projects/webasm/webasm-mkvdrv/ピッチエンベロープ仕様.md) を参照してください。
+
+`EH` `EP` `EE` の最小例:
+
+```mml
+A EP256 EH9 EE1 c2 EE0 r4
+```
+
+詳細は [_reference/mml_spec/ay_hardware_envelope.md](/Users/junt74/Projects/webasm/webasm-mkvdrv/_reference/mml_spec/ay_hardware_envelope.md) を参照してください。
+
+`MT` `MN` の最小例:
+
+```mml
+A MT7 MN1 c
+N v12 w1 c
+```
+
+ここでは `MT7` で tone を A/B/C 全有効、`MN1` で noise を A のみ有効にします。
 
 ## 4. 書き方の例
 

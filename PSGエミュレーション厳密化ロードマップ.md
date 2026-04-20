@@ -53,7 +53,13 @@
 
 - `period register` と `volume register` の shadow state を持つ段階まで実装済み
 - `tone period / volume / noise control` を chip core 側 helper で書き込む段階まで実装済み
-- 次は counter/LFSR の厳密化と、update 順のより明示的な分離に進む
+- `SN76489` の tone / noise は `clock accumulator + period counter` ベースの出力反転へ一段移行済み
+- noise control 書き込みと `LFSR reset` 判定の分離まで実装済み
+- 明示的な control write と、tone2 追従などの派生更新は runtime 上でも分離済み
+- `modeChanged` / `sourceChanged` を区別して扱う段階まで実装済み
+- 明示的な control write は register change 時に reset、派生更新は no-reset という整理まで実装済み
+- noise LFSR の shift は内部 noise clock の `0 -> 1` 遷移時だけ行う段階まで実装済み
+- 次は reset 条件の細部と、update 順のより明示的な分離に進む
 
 ### Step 2. `SN76489` 更新順と LFSR の厳密化
 

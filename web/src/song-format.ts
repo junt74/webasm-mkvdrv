@@ -30,7 +30,12 @@ export type ExportedSongEventKind =
   | "noiseOff"
   | "envelopeSelect"
   | "pan"
-  | "pitchEnvelopeSelect";
+  | "pitchEnvelopeSelect"
+  | "ayHardwareEnvelopeShape"
+  | "ayHardwareEnvelopePeriod"
+  | "ayHardwareEnvelopeEnable"
+  | "ayMixerToneMask"
+  | "ayMixerNoiseMask";
 
 export type ExportedSongEvent = {
   deltaTicks: number;
@@ -76,7 +81,12 @@ const EVENT_KIND_TO_CODE: Record<ExportedSongEventKind, number> = {
   noiseOff: 6,
   envelopeSelect: 7,
   pan: 8,
-  pitchEnvelopeSelect: 9
+  pitchEnvelopeSelect: 9,
+  ayHardwareEnvelopeShape: 10,
+  ayHardwareEnvelopePeriod: 11,
+  ayHardwareEnvelopeEnable: 12,
+  ayMixerToneMask: 13,
+  ayMixerNoiseMask: 14
 };
 
 export const sequencePayloadFromSong = (song: ExportedSong): SequencePayload => {
