@@ -1,9 +1,10 @@
-import type { ExportedSong, RenderEngine } from "./song-format";
+import type { ExportedSong, RenderEngine, SoundChipModel } from "./song-format";
 import { sequencePayloadFromSong } from "./song-format";
 
 type WorkletConfigureMessage = {
   type: "configure";
   renderEngine: RenderEngine;
+  chipModel: SoundChipModel;
   wavetable: Float32Array;
   frequency: number;
   noteFrequencies: Float32Array;
@@ -24,7 +25,8 @@ export class MkvdrvGameAudioEngine {
   private audioContext?: AudioContext;
   private workletNode?: AudioWorkletNode;
   private currentSong?: ExportedSong;
-  private renderEngine: RenderEngine = "an74689";
+  private renderEngine: RenderEngine = "psg";
+  private chipModel: SoundChipModel = "sn76489";
   private masterVolume = 1;
   private readonly wavetable: Float32Array;
   private readonly noteFrequencies: Float32Array;
@@ -48,7 +50,15 @@ export class MkvdrvGameAudioEngine {
     if (!this.workletNode) {
       this.workletNode = new AudioWorkletNode(
         this.audioContext,
-        "mkvdrv-processor"
+        "mkvdrv-processor",
+        {
+          numberOfInputs: 0,
+          numberOfOutputs: 1,
+          outputChannelCount: [2],
+          channelCount: 2,
+          channelCountMode: "explicit",
+          channelInterpretation: "discrete"
+        }
       );
       this.workletNode.connect(this.audioContext.destination);
       this.workletNode.port.postMessage(this.buildConfigureMessage());
@@ -62,6 +72,8 @@ export class MkvdrvGameAudioEngine {
   async loadSong(song: ExportedSong): Promise<void> {
     await this.initialize();
     this.currentSong = song;
+    this.chipModel = song.engine ?? "sn76489";
+    this.workletNode?.port.postMessage(this.buildConfigureMessage());
   }
 
   async loadSongFromUrl(url: string): Promise<void> {
@@ -113,10 +125,16 @@ export class MkvdrvGameAudioEngine {
     this.workletNode?.port.postMessage(this.buildConfigureMessage());
   }
 
+  setChipModel(chipModel: SoundChipModel): void {
+    this.chipModel = chipModel;
+    this.workletNode?.port.postMessage(this.buildConfigureMessage());
+  }
+
   private buildConfigureMessage(): WorkletConfigureMessage {
     return {
       type: "configure",
       renderEngine: this.renderEngine,
+      chipModel: this.chipModel,
       wavetable: this.wavetable,
       frequency: this.initialFrequency,
       noteFrequencies: this.noteFrequencies

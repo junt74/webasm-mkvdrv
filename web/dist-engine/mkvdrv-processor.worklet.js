@@ -16,13 +16,19 @@
     static EVENT_NOISE_ON = 5;
     static EVENT_NOISE_OFF = 6;
     static EVENT_ENVELOPE_SELECT = 7;
+    static EVENT_PAN = 8;
+    static EVENT_PITCH_ENVELOPE_SELECT = 9;
     static PSG_TONE_CHANNELS = 3;
     static PSG_NOISE_CHANNEL = 3;
     static PSG_NOISE_MODE_PERIODIC = 0;
     static PSG_NOISE_MODE_WHITE = 1;
+    static PSG_PAN_RIGHT = 1;
+    static PSG_PAN_LEFT = 2;
+    static PSG_PAN_BOTH = 3;
     wavetable = new Float32Array([0]);
     noteFrequencies = new Float32Array(128);
-    renderEngine = "an74689";
+    renderEngine = "psg";
+    chipModel = "sn76489";
     sequenceEvents = new Uint32Array(0);
     eventStride = 5;
     previewFrequency = 440;
@@ -41,22 +47,26 @@
     tickSamplesRemaining;
     masterVolume = 1;
     envelopes = /* @__PURE__ */ new Map();
+    pitchEnvelopes = /* @__PURE__ */ new Map();
     toneChannels = [];
     noiseChannel;
     configure({
       renderEngine,
+      chipModel,
       wavetable,
       noteFrequencies,
       frequency
     }) {
       this.renderEngine = renderEngine;
+      this.chipModel = chipModel;
       this.wavetable = new Float32Array(wavetable);
       this.noteFrequencies = new Float32Array(noteFrequencies);
       this.previewFrequency = frequency;
       this.resetChannels();
       this.configureTonePreviewVoices(frequency);
       return `AudioWorklet ready.
-Engine: ${this.renderEngine}
+Renderer: ${this.renderEngine}
+Chip: ${this.chipModel}
 Frequency: ${this.previewFrequency.toFixed(0)} Hz`;
     }
     startTone() {
@@ -65,6 +75,7 @@ Frequency: ${this.previewFrequency.toFixed(0)} Hz`;
     }
     loadSequence(payload) {
       this.mode = "sequence";
+      this.chipModel = payload.chipModel;
       this.bpm = payload.bpm;
       this.ticksPerBeat = payload.ticksPerBeat;
       this.loopCount = payload.loopCount;
@@ -77,12 +88,16 @@ Frequency: ${this.previewFrequency.toFixed(0)} Hz`;
       this.envelopes = new Map(
         payload.envelopes.map((envelope) => [envelope.id, envelope])
       );
+      this.pitchEnvelopes = new Map(
+        payload.pitchEnvelopes.map((envelope) => [envelope.id, envelope])
+      );
       this.sequenceIndex = 0;
       this.eventSamplesRemaining = 0;
       this.pendingTerminalAction = "none";
       this.resetChannels();
       this.advanceSequenceEvent();
       return `Sequence ready.
+Chip: ${this.chipModel}
 Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.eventStride}, loop: ${this.loopCount}`;
     }
     stop() {
@@ -115,10 +130,10 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
         return true;
       }
       const left = output[0];
-      const right = output[1] ?? output[0];
+      const right = output[1];
       if (this.wavetable.length === 0) {
         left.fill(0);
-        right.fill(0);
+        right?.fill(0);
         return true;
       }
       for (let index = 0; index < left.length; index += 1) {
@@ -143,11 +158,19 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
         const hasActiveNoise = this.noiseChannel.frequency > 0 || this.noiseChannel.amplitude >= 1e-4 || this.noiseChannel.targetAmplitude > 0;
         if (this.mode === "idle" && !hasActiveTone && !hasActiveNoise) {
           left[index] = 0;
-          right[index] = 0;
+          if (right) {
+            right[index] = 0;
+          }
         } else {
-          const sample = this.renderMixedSample() * this.masterVolume;
-          left[index] = sample;
-          right[index] = sample;
+          const frame = this.renderMixedFrame();
+          const leftSample = frame.left * this.masterVolume;
+          const rightSample = frame.right * this.masterVolume;
+          if (right) {
+            left[index] = leftSample;
+            right[index] = rightSample;
+          } else {
+            left[index] = (leftSample + rightSample) * 0.5;
+          }
         }
         if (this.mode === "sequence") {
           this.eventSamplesRemaining -= 1;
@@ -164,10 +187,17 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
       return {
         phase: 0,
         frequency: 0,
+        baseFrequency: 0,
         amplitude: 0,
         targetAmplitude: 0,
         baseAmplitude: 0,
+        panMask: _MkvdrvSongRuntime.PSG_PAN_BOTH,
         envelopeId: 0,
+        pitchEnvelopeId: 0,
+        pitchOffset: 0,
+        pitchDelayCounter: 0,
+        pitchSpeedCounter: 0,
+        pitchActive: false,
         envelopeGain: 1,
         envelopeStepIndex: 0,
         envelopeSpeedCounter: 0,
@@ -178,13 +208,20 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
       return {
         phase: 0,
         frequency: 0,
+        baseFrequency: 0,
         amplitude: 0,
         targetAmplitude: 0,
         lfsr: 16384,
         output: 1,
         mode: _MkvdrvSongRuntime.PSG_NOISE_MODE_WHITE,
         baseAmplitude: 0,
+        panMask: _MkvdrvSongRuntime.PSG_PAN_BOTH,
         envelopeId: 0,
+        pitchEnvelopeId: 0,
+        pitchOffset: 0,
+        pitchDelayCounter: 0,
+        pitchSpeedCounter: 0,
+        pitchActive: false,
         envelopeGain: 1,
         envelopeStepIndex: 0,
         envelopeSpeedCounter: 0,
@@ -218,28 +255,36 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
         return;
       }
       channel.frequency = frequency;
+      channel.baseFrequency = frequency;
       channel.baseAmplitude = targetAmplitude;
       if (frequency <= 0 || targetAmplitude <= 0) {
         channel.envelopeActive = false;
         channel.envelopeGain = 1;
+        channel.pitchActive = false;
+        channel.pitchOffset = 0;
       }
       if (restartEnvelope) {
         this.restartToneEnvelope(channel);
+        this.restartTonePitchEnvelope(channel);
       }
       this.refreshToneTarget(channel);
     }
     setNoiseChannel(frequency, targetAmplitude, mode, restartEnvelope = false) {
       this.noiseChannel.frequency = frequency;
+      this.noiseChannel.baseFrequency = frequency;
       this.noiseChannel.baseAmplitude = targetAmplitude;
       if (frequency <= 0 || targetAmplitude <= 0) {
         this.noiseChannel.envelopeActive = false;
         this.noiseChannel.envelopeGain = 1;
+        this.noiseChannel.pitchActive = false;
+        this.noiseChannel.pitchOffset = 0;
       }
       if (mode !== void 0) {
         this.noiseChannel.mode = mode;
       }
       if (restartEnvelope) {
         this.restartNoiseEnvelope();
+        this.restartNoisePitchEnvelope();
       }
       this.refreshNoiseTarget();
       if (frequency > 0) {
@@ -253,10 +298,38 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
       if (clamped >= 15) {
         return 0;
       }
+      if (this.chipModel === "ay38910") {
+        return 10 ** (-(clamped * 1.5) / 20);
+      }
       return 10 ** (-(clamped * 2) / 20);
     }
     refreshToneTarget(channel) {
       channel.targetAmplitude = channel.baseAmplitude * channel.envelopeGain;
+    }
+    applyPitchOffset(baseFrequency, offset) {
+      if (baseFrequency <= 0 || offset === 0) {
+        return baseFrequency;
+      }
+      return baseFrequency * 2 ** (offset / 1200);
+    }
+    refreshToneFrequency(channel) {
+      channel.frequency = this.applyPitchOffset(
+        channel.baseFrequency,
+        channel.pitchOffset
+      );
+    }
+    refreshNoiseFrequency() {
+      if (this.noiseChannel.baseFrequency <= 0) {
+        this.noiseChannel.frequency = 0;
+        return;
+      }
+      this.noiseChannel.frequency = Math.max(
+        1,
+        this.applyPitchOffset(
+          this.noiseChannel.baseFrequency,
+          this.noiseChannel.pitchOffset
+        )
+      );
     }
     refreshNoiseTarget() {
       this.noiseChannel.targetAmplitude = this.noiseChannel.baseAmplitude * this.noiseChannel.envelopeGain;
@@ -290,6 +363,38 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
       this.noiseChannel.envelopeGain = this.decodeEnvelopeGain(
         envelope.values[0] ?? 0
       );
+    }
+    restartTonePitchEnvelope(channel) {
+      const envelope = this.pitchEnvelopes.get(channel.pitchEnvelopeId);
+      if (!envelope || channel.baseFrequency <= 0) {
+        channel.pitchActive = false;
+        channel.pitchOffset = 0;
+        channel.pitchDelayCounter = 0;
+        channel.pitchSpeedCounter = 0;
+        this.refreshToneFrequency(channel);
+        return;
+      }
+      channel.pitchActive = true;
+      channel.pitchOffset = envelope.initialOffset;
+      channel.pitchDelayCounter = envelope.delay;
+      channel.pitchSpeedCounter = 0;
+      this.refreshToneFrequency(channel);
+    }
+    restartNoisePitchEnvelope() {
+      const envelope = this.pitchEnvelopes.get(this.noiseChannel.pitchEnvelopeId);
+      if (!envelope || this.noiseChannel.baseFrequency <= 0) {
+        this.noiseChannel.pitchActive = false;
+        this.noiseChannel.pitchOffset = 0;
+        this.noiseChannel.pitchDelayCounter = 0;
+        this.noiseChannel.pitchSpeedCounter = 0;
+        this.refreshNoiseFrequency();
+        return;
+      }
+      this.noiseChannel.pitchActive = true;
+      this.noiseChannel.pitchOffset = envelope.initialOffset;
+      this.noiseChannel.pitchDelayCounter = envelope.delay;
+      this.noiseChannel.pitchSpeedCounter = 0;
+      this.refreshNoiseFrequency();
     }
     advanceChannelEnvelope(channel) {
       if (!channel.envelopeActive || channel.envelopeId === 0) {
@@ -326,12 +431,60 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
         envelope.values[envelope.values.length - 1] ?? 15
       );
     }
+    advanceTonePitchEnvelope(channel) {
+      if (!channel.pitchActive || channel.pitchEnvelopeId === 0) {
+        return;
+      }
+      const envelope = this.pitchEnvelopes.get(channel.pitchEnvelopeId);
+      if (!envelope) {
+        channel.pitchActive = false;
+        channel.pitchOffset = 0;
+        this.refreshToneFrequency(channel);
+        return;
+      }
+      if (channel.pitchDelayCounter > 0) {
+        channel.pitchDelayCounter -= 1;
+        return;
+      }
+      channel.pitchSpeedCounter += 1;
+      if (channel.pitchSpeedCounter < envelope.speed) {
+        return;
+      }
+      channel.pitchSpeedCounter = 0;
+      channel.pitchOffset += envelope.step;
+      this.refreshToneFrequency(channel);
+    }
+    advanceNoisePitchEnvelope() {
+      if (!this.noiseChannel.pitchActive || this.noiseChannel.pitchEnvelopeId === 0) {
+        return;
+      }
+      const envelope = this.pitchEnvelopes.get(this.noiseChannel.pitchEnvelopeId);
+      if (!envelope) {
+        this.noiseChannel.pitchActive = false;
+        this.noiseChannel.pitchOffset = 0;
+        this.refreshNoiseFrequency();
+        return;
+      }
+      if (this.noiseChannel.pitchDelayCounter > 0) {
+        this.noiseChannel.pitchDelayCounter -= 1;
+        return;
+      }
+      this.noiseChannel.pitchSpeedCounter += 1;
+      if (this.noiseChannel.pitchSpeedCounter < envelope.speed) {
+        return;
+      }
+      this.noiseChannel.pitchSpeedCounter = 0;
+      this.noiseChannel.pitchOffset += envelope.step;
+      this.refreshNoiseFrequency();
+    }
     advanceEnvelopeTick() {
       this.toneChannels.forEach((channel) => {
         this.advanceChannelEnvelope(channel);
+        this.advanceTonePitchEnvelope(channel);
         this.refreshToneTarget(channel);
       });
       this.advanceChannelEnvelope(this.noiseChannel);
+      this.advanceNoisePitchEnvelope();
       this.refreshNoiseTarget();
     }
     decodePsgAmplitude(volume) {
@@ -340,7 +493,8 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
         return 0;
       }
       const attenuationSteps = 15 - clamped;
-      return 10 ** (-(attenuationSteps * 2) / 20);
+      const dbPerStep = this.chipModel === "ay38910" ? 1.5 : 2;
+      return 10 ** (-(attenuationSteps * dbPerStep) / 20);
     }
     decodeNoiseParam(param) {
       if (param > 255) {
@@ -354,19 +508,39 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
         mode: _MkvdrvSongRuntime.PSG_NOISE_MODE_WHITE
       };
     }
+    normalizePanMask(panMask) {
+      return panMask & _MkvdrvSongRuntime.PSG_PAN_BOTH;
+    }
+    applyPanLevel(panMask, sample) {
+      const normalized = this.normalizePanMask(panMask);
+      return {
+        left: (normalized & _MkvdrvSongRuntime.PSG_PAN_LEFT) !== 0 ? sample : 0,
+        right: (normalized & _MkvdrvSongRuntime.PSG_PAN_RIGHT) !== 0 ? sample : 0
+      };
+    }
     configureTonePreviewVoices(frequency) {
       const previewFrequencies = [frequency, frequency * 1.5, frequency * 2];
       this.toneChannels.forEach((channel, index) => {
         channel.frequency = previewFrequencies[index] ?? frequency;
+        channel.baseFrequency = previewFrequencies[index] ?? frequency;
         channel.baseAmplitude = this.decodePsgAmplitude(15);
+        channel.panMask = _MkvdrvSongRuntime.PSG_PAN_BOTH;
         channel.envelopeId = 0;
+        channel.pitchEnvelopeId = 0;
+        channel.pitchOffset = 0;
+        channel.pitchActive = false;
         channel.envelopeGain = 1;
         channel.envelopeActive = false;
         this.refreshToneTarget(channel);
       });
       this.noiseChannel.frequency = 0;
+      this.noiseChannel.baseFrequency = 0;
       this.noiseChannel.baseAmplitude = 0;
       this.noiseChannel.targetAmplitude = 0;
+      this.noiseChannel.panMask = _MkvdrvSongRuntime.PSG_PAN_BOTH;
+      this.noiseChannel.pitchEnvelopeId = 0;
+      this.noiseChannel.pitchOffset = 0;
+      this.noiseChannel.pitchActive = false;
     }
     advanceSequenceEvent() {
       if (this.sequenceEvents.length === 0) {
@@ -429,6 +603,31 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
             this.restartNoiseEnvelope();
             this.refreshNoiseTarget();
           }
+        }
+      } else if (eventKind === _MkvdrvSongRuntime.EVENT_PITCH_ENVELOPE_SELECT) {
+        if (channel < _MkvdrvSongRuntime.PSG_TONE_CHANNELS) {
+          const toneChannel = this.toneChannels[channel];
+          if (toneChannel) {
+            toneChannel.pitchEnvelopeId = value;
+            if (toneChannel.baseFrequency > 0) {
+              this.restartTonePitchEnvelope(toneChannel);
+            }
+          }
+        } else if (channel === _MkvdrvSongRuntime.PSG_NOISE_CHANNEL) {
+          this.noiseChannel.pitchEnvelopeId = value;
+          if (this.noiseChannel.baseFrequency > 0) {
+            this.restartNoisePitchEnvelope();
+          }
+        }
+      } else if (eventKind === _MkvdrvSongRuntime.EVENT_PAN) {
+        const panMask = this.normalizePanMask(value);
+        if (channel < _MkvdrvSongRuntime.PSG_TONE_CHANNELS) {
+          const toneChannel = this.toneChannels[channel];
+          if (toneChannel) {
+            toneChannel.panMask = panMask;
+          }
+        } else if (channel === _MkvdrvSongRuntime.PSG_NOISE_CHANNEL) {
+          this.noiseChannel.panMask = panMask;
         }
       } else if (eventKind === _MkvdrvSongRuntime.EVENT_NOISE_ON) {
         this.setNoiseChannel(
@@ -539,9 +738,22 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
       return sample;
     }
     renderPsgToneChannel(channel) {
+      if (this.chipModel === "ay38910") {
+        return this.renderAyToneChannel(channel);
+      }
       const phaseStep = channel.frequency / this.sampleRateValue;
       const cyclePhase = channel.phase - Math.floor(channel.phase);
       const sample = cyclePhase < 0.5 ? 1 : -1;
+      channel.phase += phaseStep;
+      if (channel.phase >= 1) {
+        channel.phase -= Math.floor(channel.phase);
+      }
+      return sample;
+    }
+    renderAyToneChannel(channel) {
+      const phaseStep = channel.frequency / this.sampleRateValue;
+      const cyclePhase = channel.phase - Math.floor(channel.phase);
+      const sample = cyclePhase < 0.5 ? 0.85 : -0.85;
       channel.phase += phaseStep;
       if (channel.phase >= 1) {
         channel.phase -= Math.floor(channel.phase);
@@ -555,7 +767,7 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
       const phaseStep = Math.max(1, this.noiseChannel.frequency) / this.sampleRateValue;
       this.noiseChannel.phase += phaseStep;
       while (this.noiseChannel.phase >= 1) {
-        const feedbackBit = this.noiseChannel.mode === _MkvdrvSongRuntime.PSG_NOISE_MODE_PERIODIC ? this.noiseChannel.lfsr & 1 : (this.noiseChannel.lfsr ^ this.noiseChannel.lfsr >> 1) & 1;
+        const feedbackBit = this.noiseChannel.mode === _MkvdrvSongRuntime.PSG_NOISE_MODE_PERIODIC ? this.periodicNoiseFeedbackBit() : this.whiteNoiseFeedbackBit();
         const feedback = feedbackBit << 14;
         this.noiseChannel.lfsr = this.noiseChannel.lfsr >> 1 | feedback;
         this.noiseChannel.output = this.noiseChannel.lfsr & 1 ? 1 : -1;
@@ -565,10 +777,24 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
         this.noiseChannel.amplitude,
         this.noiseChannel.targetAmplitude
       );
-      return this.noiseChannel.output * this.noiseChannel.amplitude * 0.1;
+      const noiseLevel = this.chipModel === "ay38910" ? 0.07 : 0.1;
+      return this.noiseChannel.output * this.noiseChannel.amplitude * noiseLevel;
     }
-    renderMixedSample() {
-      let mix = 0;
+    periodicNoiseFeedbackBit() {
+      if (this.chipModel === "ay38910") {
+        return this.noiseChannel.lfsr >> 3 & 1;
+      }
+      return this.noiseChannel.lfsr & 1;
+    }
+    whiteNoiseFeedbackBit() {
+      if (this.chipModel === "ay38910") {
+        return (this.noiseChannel.lfsr ^ this.noiseChannel.lfsr >> 2 ^ this.noiseChannel.lfsr >> 3 ^ this.noiseChannel.lfsr >> 5) & 1;
+      }
+      return (this.noiseChannel.lfsr ^ this.noiseChannel.lfsr >> 1) & 1;
+    }
+    renderMixedFrame() {
+      let left = 0;
+      let right = 0;
       this.toneChannels.forEach((channel) => {
         channel.amplitude = this.updateEnvelope(
           channel.amplitude,
@@ -577,14 +803,27 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
         if (channel.frequency <= 0 || channel.amplitude < 1e-4) {
           return;
         }
-        const sample = this.renderEngine === "an74689" ? this.renderPsgToneChannel(channel) : this.renderSineChannel(channel);
-        const outputLevel = this.renderEngine === "an74689" ? 0.12 : 0.22;
-        mix += sample * channel.amplitude * outputLevel;
+        const sample = this.renderEngine === "psg" ? this.renderPsgToneChannel(channel) : this.renderSineChannel(channel);
+        const outputLevel = this.renderEngine === "psg" ? this.chipModel === "ay38910" ? 0.1 : 0.12 : 0.22;
+        const panned = this.applyPanLevel(
+          channel.panMask,
+          sample * channel.amplitude * outputLevel
+        );
+        left += panned.left;
+        right += panned.right;
       });
-      if (this.renderEngine === "an74689") {
-        mix += this.renderNoiseChannel();
+      if (this.renderEngine === "psg") {
+        const pannedNoise = this.applyPanLevel(
+          this.noiseChannel.panMask,
+          this.renderNoiseChannel()
+        );
+        left += pannedNoise.left;
+        right += pannedNoise.right;
       }
-      return mix / 4;
+      return {
+        left: left / 4,
+        right: right / 4
+      };
     }
   };
 
@@ -599,6 +838,7 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
           this.port.postMessage(
             this.runtime.configure({
               renderEngine: message.renderEngine,
+              chipModel: message.chipModel,
               wavetable: message.wavetable,
               noteFrequencies: message.noteFrequencies,
               frequency: message.frequency
@@ -617,9 +857,11 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
               ticksPerBeat: message.ticksPerBeat,
               loopCount: message.loopCount,
               tailTicks: message.tailTicks,
+              chipModel: message.chipModel,
               sequenceEvents: message.sequenceEvents,
               eventStride: message.eventStride,
-              envelopes: message.envelopes
+              envelopes: message.envelopes,
+              pitchEnvelopes: message.pitchEnvelopes
             })
           );
           return;

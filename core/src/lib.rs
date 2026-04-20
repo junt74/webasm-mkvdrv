@@ -6,9 +6,11 @@ use serde::Serialize;
 
 use mml::{
     EVENT_ENVELOPE_SELECT, EVENT_NOISE_OFF, EVENT_NOISE_ON, EVENT_NOTE_OFF, EVENT_NOTE_ON,
-    EVENT_TEMPO, EVENT_VOLUME, EnvelopeDefinition, PSG_DEFAULT_VOLUME, PSG_NOISE_MODE_WHITE,
-    ParseFailure, SequenceEvent, collect_parse_diagnostics_with_context,
-    format_parse_failure_with_context, parse_failure_quick_fixes, parse_mml_with_context,
+    EVENT_PAN, EVENT_PITCH_ENVELOPE_SELECT, EVENT_TEMPO, EVENT_VOLUME, EnvelopeDefinition,
+    PSG_DEFAULT_VOLUME, PSG_NOISE_MODE_WHITE, ParseFailure, PitchEnvelopeDefinition,
+    SequenceEvent,
+    collect_parse_diagnostics_with_context, format_parse_failure_with_context,
+    parse_failure_quick_fixes, parse_mml_with_context,
 };
 
 const INIT_MESSAGE: &[u8] = b"MKVDRV-Wasm core initialized";
@@ -34,6 +36,9 @@ static mut ENVELOPE_DEFINITION_HEADERS: [u32; ENVELOPE_DEFINITION_CAPACITY
     * ENVELOPE_HEADER_STRIDE] = [0; ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_HEADER_STRIDE];
 static mut ENVELOPE_DEFINITION_VALUES: [u32; ENVELOPE_DEFINITION_CAPACITY
     * ENVELOPE_VALUE_CAPACITY] = [0; ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_VALUE_CAPACITY];
+static mut PITCH_ENVELOPE_DEFINITION_COUNT: usize = 0;
+static mut PITCH_ENVELOPE_DEFINITION_HEADERS: [i32; ENVELOPE_DEFINITION_CAPACITY * 5] =
+    [0; ENVELOPE_DEFINITION_CAPACITY * 5];
 static mut EXPORTED_SONG_JSON: [u8; EXPORTED_SONG_JSON_CAPACITY] = [0; EXPORTED_SONG_JSON_CAPACITY];
 static mut EXPORTED_SONG_JSON_LEN: usize = 0;
 static mut MML_INPUT_BUFFER: [u8; MML_INPUT_CAPACITY] = [0; MML_INPUT_CAPACITY];
@@ -94,6 +99,7 @@ struct ExportedSong<'a> {
     tail_ticks: u32,
     channels: Vec<ExportedSongChannel<'a>>,
     envelopes: Vec<ExportedSongEnvelope>,
+    pitch_envelopes: Vec<ExportedSongPitchEnvelope>,
     events: Vec<ExportedSongEvent<'a>>,
 }
 
@@ -111,6 +117,16 @@ struct ExportedSongEnvelope {
     speed: u32,
     values: Vec<u32>,
     loop_start: Option<u32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportedSongPitchEnvelope {
+    id: u32,
+    initial_offset: i32,
+    speed: u32,
+    step: i32,
+    delay: u32,
 }
 
 #[derive(Serialize)]
@@ -225,6 +241,21 @@ pub extern "C" fn mkvdrv_envelope_definition_header_stride() -> usize {
 #[unsafe(no_mangle)]
 pub extern "C" fn mkvdrv_envelope_definition_value_stride() -> usize {
     ENVELOPE_VALUE_CAPACITY
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_pitch_envelope_definition_count() -> usize {
+    unsafe { PITCH_ENVELOPE_DEFINITION_COUNT }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_pitch_envelope_definition_headers_ptr() -> *const i32 {
+    core::ptr::addr_of!(PITCH_ENVELOPE_DEFINITION_HEADERS).cast::<i32>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkvdrv_pitch_envelope_definition_header_stride() -> usize {
+    5
 }
 
 #[unsafe(no_mangle)]
@@ -356,6 +387,7 @@ pub extern "C" fn mkvdrv_parse_mml_from_buffer(input_len: usize) -> usize {
     fill_sequence_events_from_mml(source).unwrap_or_else(|error| {
         clear_exported_song_json();
         clear_envelope_definitions();
+        clear_pitch_envelope_definitions();
         store_parse_failures(source, &error);
         0
     })
@@ -368,6 +400,7 @@ pub extern "C" fn mkvdrv_export_song_json_from_buffer(input_len: usize) -> usize
     export_song_json_from_mml(source).unwrap_or_else(|error| {
         clear_exported_song_json();
         clear_envelope_definitions();
+        clear_pitch_envelope_definitions();
         store_parse_failures(source, &error);
         0
     })
@@ -383,6 +416,7 @@ fn fill_sequence_events_from_mml(source: &str) -> Result<usize, ParseFailure> {
     let parsed = parse_mml_with_context(source, SEQUENCE_EVENT_CAPACITY, branch_index)?;
     let (playback_events, tail_ticks) = build_playback_events(&parsed.events);
     write_envelope_definitions(&parsed.envelopes);
+    write_pitch_envelope_definitions(&parsed.pitch_envelopes);
     store_sequence_metadata(
         parsed.ticks_per_beat,
         sequence_bpm_from_events(&parsed.events),
@@ -410,6 +444,7 @@ fn export_song_json_from_mml(source: &str) -> Result<usize, ParseFailure> {
     let parsed = parse_mml_with_context(source, SEQUENCE_EVENT_CAPACITY, branch_index)?;
     let (playback_events, tail_ticks) = build_playback_events(&parsed.events);
     write_envelope_definitions(&parsed.envelopes);
+    write_pitch_envelope_definitions(&parsed.pitch_envelopes);
     store_sequence_metadata(
         parsed.ticks_per_beat,
         sequence_bpm_from_events(&parsed.events),
@@ -421,6 +456,7 @@ fn export_song_json_from_mml(source: &str) -> Result<usize, ParseFailure> {
         parsed.loop_count,
         tail_ticks,
         &parsed.envelopes,
+        &parsed.pitch_envelopes,
         &playback_events,
     );
     clear_parse_failure();
@@ -430,6 +466,7 @@ fn export_song_json_from_mml(source: &str) -> Result<usize, ParseFailure> {
 fn fill_demo_sequence_events() -> usize {
     clear_exported_song_json();
     clear_envelope_definitions();
+    clear_pitch_envelope_definitions();
     let demo_events = [
         SequenceEvent {
             kind: EVENT_TEMPO,
@@ -561,12 +598,13 @@ fn write_exported_song_json(
     loop_count: i32,
     tail_ticks: u32,
     envelopes: &[EnvelopeDefinition],
+    pitch_envelopes: &[PitchEnvelopeDefinition],
     events: &[SequenceEvent],
 ) {
     let song = ExportedSong {
         format: "mkvdrv-song",
         version: 1,
-        engine: "an74689",
+        engine: "sn76489",
         ticks_per_beat,
         loop_count,
         tail_ticks,
@@ -595,6 +633,16 @@ fn write_exported_song_json(
                 speed: entry.speed,
                 values: entry.values.clone(),
                 loop_start: entry.loop_start,
+            })
+            .collect(),
+        pitch_envelopes: pitch_envelopes
+            .iter()
+            .map(|entry| ExportedSongPitchEnvelope {
+                id: entry.id,
+                initial_offset: entry.initial_offset,
+                speed: entry.speed,
+                step: entry.step,
+                delay: entry.delay,
             })
             .collect(),
         events: events
@@ -661,6 +709,26 @@ fn write_envelope_definitions(definitions: &[EnvelopeDefinition]) {
     }
 }
 
+fn write_pitch_envelope_definitions(definitions: &[PitchEnvelopeDefinition]) {
+    clear_pitch_envelope_definitions();
+    let count = definitions.len().min(ENVELOPE_DEFINITION_CAPACITY);
+
+    unsafe {
+        PITCH_ENVELOPE_DEFINITION_COUNT = count;
+    }
+
+    for (index, definition) in definitions.iter().take(count).enumerate() {
+        let header_base = index * 5;
+        unsafe {
+            PITCH_ENVELOPE_DEFINITION_HEADERS[header_base] = definition.id as i32;
+            PITCH_ENVELOPE_DEFINITION_HEADERS[header_base + 1] = definition.initial_offset;
+            PITCH_ENVELOPE_DEFINITION_HEADERS[header_base + 2] = definition.speed as i32;
+            PITCH_ENVELOPE_DEFINITION_HEADERS[header_base + 3] = definition.step;
+            PITCH_ENVELOPE_DEFINITION_HEADERS[header_base + 4] = definition.delay as i32;
+        }
+    }
+}
+
 fn clear_envelope_definitions() {
     unsafe {
         ENVELOPE_DEFINITION_COUNT = 0;
@@ -675,6 +743,18 @@ fn clear_envelope_definitions() {
     for slot in 0..(ENVELOPE_DEFINITION_CAPACITY * ENVELOPE_VALUE_CAPACITY) {
         unsafe {
             ENVELOPE_DEFINITION_VALUES[slot] = 0;
+        }
+    }
+}
+
+fn clear_pitch_envelope_definitions() {
+    unsafe {
+        PITCH_ENVELOPE_DEFINITION_COUNT = 0;
+    }
+
+    for slot in 0..(ENVELOPE_DEFINITION_CAPACITY * 5) {
+        unsafe {
+            PITCH_ENVELOPE_DEFINITION_HEADERS[slot] = 0;
         }
     }
 }
@@ -717,9 +797,11 @@ fn event_priority(kind: u32) -> u32 {
     match kind {
         EVENT_TEMPO => 0,
         EVENT_VOLUME => 1,
-        EVENT_ENVELOPE_SELECT => 2,
-        EVENT_NOTE_OFF | EVENT_NOISE_OFF => 3,
-        EVENT_NOTE_ON | EVENT_NOISE_ON => 4,
+        EVENT_PAN => 2,
+        EVENT_ENVELOPE_SELECT => 3,
+        EVENT_PITCH_ENVELOPE_SELECT => 4,
+        EVENT_NOTE_OFF | EVENT_NOISE_OFF => 5,
+        EVENT_NOTE_ON | EVENT_NOISE_ON => 6,
         _ => 4,
     }
 }
@@ -733,6 +815,8 @@ fn event_kind_name(kind: u32) -> &'static str {
         EVENT_NOISE_ON => "noiseOn",
         EVENT_NOISE_OFF => "noiseOff",
         EVENT_ENVELOPE_SELECT => "envelopeSelect",
+        EVENT_PAN => "pan",
+        EVENT_PITCH_ENVELOPE_SELECT => "pitchEnvelopeSelect",
         _ => "unknown",
     }
 }
@@ -976,7 +1060,7 @@ mod tests {
     #[test]
     fn parses_mml_from_buffer() {
         let _guard = lock_test_state();
-        let input = b"@E1={1,0,4,8}\nA @E1 t150 o4 l8 c r d";
+        let input = b"@E1={1,0,4,8}\nA p2 @E1 t150 o4 l8 c r d";
 
         unsafe {
             MML_INPUT_BUFFER[..input.len()].copy_from_slice(input);
@@ -984,7 +1068,7 @@ mod tests {
 
         let event_count = mkvdrv_parse_mml_from_buffer(input.len());
 
-        assert_eq!(event_count, 7);
+        assert_eq!(event_count, 8);
         assert_eq!(unsafe { SEQUENCE_EVENTS[0] }, EVENT_TEMPO);
         assert_eq!(unsafe { SEQUENCE_EVENTS[1] }, 150);
         assert_eq!(unsafe { ENVELOPE_DEFINITION_COUNT }, 1);
@@ -993,20 +1077,25 @@ mod tests {
         assert_eq!(unsafe { ENVELOPE_DEFINITION_VALUES[0] }, 0);
         assert_eq!(
             unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE] },
-            EVENT_ENVELOPE_SELECT
+            EVENT_PAN
         );
-        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE + 1] }, 1);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE + 1] }, 2);
         assert_eq!(
             unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2] },
+            EVENT_ENVELOPE_SELECT
+        );
+        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2 + 1] }, 1);
+        assert_eq!(
+            unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 3] },
             EVENT_NOTE_ON
         );
         assert_eq!(
-            unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2 + 1] },
+            unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 3 + 1] },
             36
         );
-        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2 + 3] }, 0);
+        assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 3 + 3] }, 0);
         assert_eq!(
-            unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2 + 4] },
+            unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 3 + 4] },
             PSG_DEFAULT_VOLUME
         );
     }
@@ -1014,7 +1103,7 @@ mod tests {
     #[test]
     fn exports_song_json_from_buffer() {
         let _guard = lock_test_state();
-        let input = b"L3\n@E1={1,0,4,8}\nA @E1 t150 o4 l8 c r d";
+        let input = b"L3\n@E1={1,0,4,8}\nA p2 @E1 t150 o4 l8 c r d";
 
         unsafe {
             MML_INPUT_BUFFER[..input.len()].copy_from_slice(input);
@@ -1028,9 +1117,10 @@ mod tests {
         };
 
         assert!(json.contains("\"format\": \"mkvdrv-song\""));
-        assert!(json.contains("\"engine\": \"an74689\""));
+        assert!(json.contains("\"engine\": \"sn76489\""));
         assert!(json.contains("\"loopCount\": 3"));
         assert!(json.contains("\"kind\": \"envelopeSelect\""));
+        assert!(json.contains("\"kind\": \"pan\""));
         assert!(json.contains("\"envelopes\""));
     }
 

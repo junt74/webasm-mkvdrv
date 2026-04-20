@@ -1,10 +1,19 @@
-export type RenderEngine = "sine" | "an74689";
+export type RenderEngine = "sine" | "psg";
+export type SoundChipModel = "sn76489" | "ay38910";
 
 export type SequenceEnvelope = {
   id: number;
   speed: number;
   values: number[];
   loopStart?: number;
+};
+
+export type SequencePitchEnvelope = {
+  id: number;
+  initialOffset: number;
+  speed: number;
+  step: number;
+  delay: number;
 };
 
 export type ExportedSongChannel = {
@@ -19,7 +28,9 @@ export type ExportedSongEventKind =
   | "volume"
   | "noiseOn"
   | "noiseOff"
-  | "envelopeSelect";
+  | "envelopeSelect"
+  | "pan"
+  | "pitchEnvelopeSelect";
 
 export type ExportedSongEvent = {
   deltaTicks: number;
@@ -32,12 +43,13 @@ export type ExportedSongEvent = {
 export type ExportedSong = {
   format: "mkvdrv-song";
   version: 1;
-  engine: "an74689";
+  engine: SoundChipModel;
   ticksPerBeat: number;
   loopCount: number;
   tailTicks: number;
   channels: ExportedSongChannel[];
   envelopes: SequenceEnvelope[];
+  pitchEnvelopes: SequencePitchEnvelope[];
   events: ExportedSongEvent[];
 };
 
@@ -46,9 +58,11 @@ export type SequencePayload = {
   ticksPerBeat: number;
   loopCount: number;
   tailTicks: number;
+  chipModel: SoundChipModel;
   sequenceEvents: Uint32Array;
   eventStride: number;
   envelopes: SequenceEnvelope[];
+  pitchEnvelopes: SequencePitchEnvelope[];
 };
 
 export const SEQUENCE_EVENT_STRIDE = 5;
@@ -60,7 +74,9 @@ const EVENT_KIND_TO_CODE: Record<ExportedSongEventKind, number> = {
   volume: 4,
   noiseOn: 5,
   noiseOff: 6,
-  envelopeSelect: 7
+  envelopeSelect: 7,
+  pan: 8,
+  pitchEnvelopeSelect: 9
 };
 
 export const sequencePayloadFromSong = (song: ExportedSong): SequencePayload => {
@@ -82,8 +98,10 @@ export const sequencePayloadFromSong = (song: ExportedSong): SequencePayload => 
     ticksPerBeat: song.ticksPerBeat,
     loopCount: song.loopCount ?? 0,
     tailTicks: song.tailTicks ?? 0,
+    chipModel: song.engine ?? "sn76489",
     sequenceEvents: data,
     eventStride: SEQUENCE_EVENT_STRIDE,
-    envelopes: song.envelopes
+    envelopes: song.envelopes,
+    pitchEnvelopes: song.pitchEnvelopes ?? []
   };
 };

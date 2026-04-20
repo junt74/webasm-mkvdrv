@@ -18,8 +18,11 @@ pub const EVENT_VOLUME: u32 = 4;
 pub const EVENT_NOISE_ON: u32 = 5;
 pub const EVENT_NOISE_OFF: u32 = 6;
 pub const EVENT_ENVELOPE_SELECT: u32 = 7;
+pub const EVENT_PAN: u32 = 8;
+pub const EVENT_PITCH_ENVELOPE_SELECT: u32 = 9;
 pub const PSG_DEFAULT_CHANNEL: u32 = 0;
 pub const PSG_DEFAULT_VOLUME: u32 = 12;
+pub const PSG_DEFAULT_PAN: u32 = 3;
 #[allow(dead_code)]
 pub const PSG_NOISE_MODE_PERIODIC: u32 = 0;
 pub const PSG_NOISE_MODE_WHITE: u32 = 1;
@@ -39,6 +42,7 @@ pub struct ParsedSequence {
     pub loop_count: i32,
     pub events: Vec<SequenceEvent>,
     pub envelopes: Vec<EnvelopeDefinition>,
+    pub pitch_envelopes: Vec<PitchEnvelopeDefinition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +54,15 @@ pub struct EnvelopeDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PitchEnvelopeDefinition {
+    pub id: u32,
+    pub initial_offset: i32,
+    pub speed: u32,
+    pub step: i32,
+    pub delay: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     UnexpectedCharacter(char),
     MissingParameter(char),
@@ -58,8 +71,11 @@ pub enum ParseError {
     InvalidOctave,
     InvalidQuantize,
     InvalidNoiseMode,
+    InvalidPan,
     InvalidEnvelopeDefinition,
     InvalidEnvelopeSelection,
+    InvalidPitchEnvelopeDefinition,
+    InvalidPitchEnvelopeSelection,
     InvalidLoopCount,
     InvalidTie,
     InvalidSlur,
@@ -84,8 +100,11 @@ impl fmt::Display for ParseError {
             Self::InvalidOctave => write!(f, "invalid octave"),
             Self::InvalidQuantize => write!(f, "invalid quantize"),
             Self::InvalidNoiseMode => write!(f, "invalid noise mode"),
+            Self::InvalidPan => write!(f, "invalid pan"),
             Self::InvalidEnvelopeDefinition => write!(f, "invalid envelope definition"),
             Self::InvalidEnvelopeSelection => write!(f, "invalid envelope selection"),
+            Self::InvalidPitchEnvelopeDefinition => write!(f, "invalid pitch envelope definition"),
+            Self::InvalidPitchEnvelopeSelection => write!(f, "invalid pitch envelope selection"),
             Self::InvalidLoopCount => write!(f, "invalid loop count"),
             Self::InvalidTie => write!(f, "invalid '^' target"),
             Self::InvalidSlur => write!(f, "invalid '&' target"),
@@ -119,8 +138,10 @@ struct TrackState {
     quantize_denominator: u32,
     early_release_ticks: u32,
     volume: u32,
+    pan: u32,
     noise_mode: u32,
     envelope_id: u32,
+    pitch_envelope_id: u32,
 }
 
 impl Default for TrackState {
@@ -133,8 +154,10 @@ impl Default for TrackState {
             quantize_denominator: DEFAULT_QUANTIZE_DENOMINATOR,
             early_release_ticks: 0,
             volume: PSG_DEFAULT_VOLUME,
+            pan: PSG_DEFAULT_PAN,
             noise_mode: PSG_NOISE_MODE_WHITE,
             envelope_id: 0,
+            pitch_envelope_id: 0,
         }
     }
 }
@@ -225,6 +248,7 @@ pub fn parse_mml_with_context(
         loop_count: parser.loop_count,
         events: parser.events,
         envelopes: parser.envelope_definitions,
+        pitch_envelopes: parser.pitch_envelope_definitions,
     })
 }
 
@@ -623,6 +647,7 @@ struct Parser {
     active_channels: Vec<u32>,
     track_states: [TrackState; PSG_CHANNEL_COUNT],
     envelope_definitions: Vec<EnvelopeDefinition>,
+    pitch_envelope_definitions: Vec<PitchEnvelopeDefinition>,
     events: Vec<SequenceEvent>,
 }
 
@@ -637,6 +662,7 @@ impl Parser {
             active_channels: vec![PSG_DEFAULT_CHANNEL],
             track_states: [TrackState::default(); PSG_CHANNEL_COUNT],
             envelope_definitions: Vec::new(),
+            pitch_envelope_definitions: Vec::new(),
             events: Vec::new(),
         }
     }
@@ -759,6 +785,18 @@ impl Parser {
                             0
                         };
                         self.push_event_with_meta(EVENT_VOLUME, volume, 0, channel, param)?;
+                    }
+                }
+                b'p' => {
+                    index += 1;
+                    let pan = read_required_number(bytes, &mut index, 'p')
+                        .map_err(|error| ParseFailure::at(position, error))?;
+                    if pan > 3 {
+                        return Err(ParseFailure::at(position, ParseError::InvalidPan));
+                    }
+                    for channel in self.active_channels.clone() {
+                        self.track_state_mut(channel).pan = pan;
+                        self.push_event_with_meta(EVENT_PAN, pan, 0, channel, 0)?;
                     }
                 }
                 b'w' => {
@@ -1042,6 +1080,23 @@ impl Parser {
                 }
                 Ok(())
             }
+            Some(b'p') => {
+                *index += 1;
+                skip_spaces_inline(bytes, index);
+                let envelope_id = read_required_number(bytes, index, 'p')
+                    .map_err(|_| ParseError::InvalidPitchEnvelopeSelection)?;
+                skip_spaces_inline(bytes, index);
+
+                if matches!(peek(bytes, *index), Some(b'=')) {
+                    *index += 1;
+                    let definition =
+                        self.parse_pitch_envelope_definition(bytes, index, envelope_id)?;
+                    self.store_pitch_envelope_definition(definition);
+                    return Ok(());
+                }
+
+                self.apply_pitch_envelope_selection(envelope_id)
+            }
             Some(other) => Err(ParseError::UnexpectedCharacter(other as char)),
             None => Err(ParseError::UnexpectedCharacter('\0')),
         }
@@ -1065,6 +1120,24 @@ impl Parser {
         for channel in self.active_channels.clone() {
             self.track_state_mut(channel).envelope_id = envelope_id;
             self.push_event_with_meta(EVENT_ENVELOPE_SELECT, envelope_id, 0, channel, 0)
+                .map_err(|_| ParseError::TooManyEvents)?;
+        }
+        Ok(())
+    }
+
+    fn apply_pitch_envelope_selection(&mut self, envelope_id: u32) -> Result<(), ParseError> {
+        if envelope_id != 0
+            && !self
+                .pitch_envelope_definitions
+                .iter()
+                .any(|definition| definition.id == envelope_id)
+        {
+            return Err(ParseError::InvalidPitchEnvelopeSelection);
+        }
+
+        for channel in self.active_channels.clone() {
+            self.track_state_mut(channel).pitch_envelope_id = envelope_id;
+            self.push_event_with_meta(EVENT_PITCH_ENVELOPE_SELECT, envelope_id, 0, channel, 0)
                 .map_err(|_| ParseError::TooManyEvents)?;
         }
         Ok(())
@@ -1135,6 +1208,48 @@ impl Parser {
         })
     }
 
+    fn parse_pitch_envelope_definition(
+        &self,
+        bytes: &[u8],
+        index: &mut usize,
+        envelope_id: u32,
+    ) -> Result<PitchEnvelopeDefinition, ParseError> {
+        skip_spaces_inline(bytes, index);
+        if !matches!(peek(bytes, *index), Some(b'{')) {
+            return Err(ParseError::InvalidPitchEnvelopeDefinition);
+        }
+        *index += 1;
+
+        let mut items = Vec::new();
+        loop {
+            skip_spaces_and_commas(bytes, index);
+            match peek(bytes, *index) {
+                Some(b'}') => {
+                    *index += 1;
+                    break;
+                }
+                Some(_) => {
+                    let value = read_signed_number(bytes, index)
+                        .ok_or(ParseError::InvalidPitchEnvelopeDefinition)?;
+                    items.push(value);
+                }
+                None => return Err(ParseError::InvalidPitchEnvelopeDefinition),
+            }
+        }
+
+        if items.len() != 4 || items[1] <= 0 || items[3] < 0 {
+            return Err(ParseError::InvalidPitchEnvelopeDefinition);
+        }
+
+        Ok(PitchEnvelopeDefinition {
+            id: envelope_id,
+            initial_offset: items[0],
+            speed: items[1] as u32,
+            step: items[2],
+            delay: items[3] as u32,
+        })
+    }
+
     fn store_envelope_definition(&mut self, definition: EnvelopeDefinition) {
         if let Some(index) = self
             .envelope_definitions
@@ -1144,6 +1259,18 @@ impl Parser {
             self.envelope_definitions[index] = definition;
         } else {
             self.envelope_definitions.push(definition);
+        }
+    }
+
+    fn store_pitch_envelope_definition(&mut self, definition: PitchEnvelopeDefinition) {
+        if let Some(index) = self
+            .pitch_envelope_definitions
+            .iter()
+            .position(|entry| entry.id == definition.id)
+        {
+            self.pitch_envelope_definitions[index] = definition;
+        } else {
+            self.pitch_envelope_definitions.push(definition);
         }
     }
 
@@ -1463,20 +1590,7 @@ fn read_required_signed_number(
     index: &mut usize,
     command: char,
 ) -> Result<i32, ParseError> {
-    let sign = match peek(bytes, *index) {
-        Some(b'-') => {
-            *index += 1;
-            -1
-        }
-        Some(b'+') => {
-            *index += 1;
-            1
-        }
-        _ => 1,
-    };
-
-    let value = read_unsigned_number(bytes, index).ok_or(ParseError::MissingParameter(command))?;
-    Ok((value as i32) * sign)
+    read_signed_number(bytes, index).ok_or(ParseError::MissingParameter(command))
 }
 
 fn read_unsigned_number(bytes: &[u8], index: &mut usize) -> Option<u32> {
@@ -1494,6 +1608,22 @@ fn read_unsigned_number(bytes: &[u8], index: &mut usize) -> Option<u32> {
     }
 
     if *index == start { None } else { Some(value) }
+}
+
+fn read_signed_number(bytes: &[u8], index: &mut usize) -> Option<i32> {
+    let sign = match peek(bytes, *index) {
+        Some(b'-') => {
+            *index += 1;
+            -1
+        }
+        Some(b'+') => {
+            *index += 1;
+            1
+        }
+        _ => 1,
+    };
+
+    read_unsigned_number(bytes, index).map(|value| (value as i32) * sign)
 }
 
 struct LoopSections<'a> {
@@ -1799,11 +1929,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_pan_events() {
+        let parsed = parse_mml("A p2 c\nN p1 c", 64).expect("parse ok");
+
+        assert_eq!(parsed.events[0].kind, EVENT_PAN);
+        assert_eq!(parsed.events[0].value, 2);
+        assert_eq!(parsed.events[0].channel, 0);
+        assert_eq!(parsed.events[1].kind, EVENT_NOTE_ON);
+        assert_eq!(parsed.events[2].kind, EVENT_NOTE_OFF);
+        assert_eq!(parsed.events[3].kind, EVENT_PAN);
+        assert_eq!(parsed.events[3].value, 1);
+        assert_eq!(parsed.events[3].channel, PSG_NOISE_CHANNEL);
+    }
+
+    #[test]
     fn rejects_invalid_noise_mode() {
         let error = parse_mml("N w2 c", 64).expect_err("parse error");
 
         assert_eq!(error.error, ParseError::InvalidNoiseMode);
         assert_eq!(error.position, 2);
+    }
+
+    #[test]
+    fn rejects_invalid_pan() {
+        let error = parse_mml("p4 c", 64).expect_err("parse error");
+
+        assert_eq!(error.error, ParseError::InvalidPan);
+        assert_eq!(error.position, 0);
     }
 
     #[test]
@@ -1821,6 +1973,28 @@ mod tests {
         assert_eq!(parsed.events[0].channel, 0);
         assert_eq!(parsed.events[1].kind, EVENT_VOLUME);
         assert_eq!(parsed.events[2].kind, EVENT_NOTE_ON);
+    }
+
+    #[test]
+    fn parses_pitch_envelope_definition_and_selection() {
+        let parsed = parse_mml("@p1={3000,1,-150,0}\nA @p1 c", 64).expect("parse ok");
+
+        assert_eq!(parsed.pitch_envelopes.len(), 1);
+        assert_eq!(parsed.pitch_envelopes[0].id, 1);
+        assert_eq!(parsed.pitch_envelopes[0].initial_offset, 3000);
+        assert_eq!(parsed.pitch_envelopes[0].speed, 1);
+        assert_eq!(parsed.pitch_envelopes[0].step, -150);
+        assert_eq!(parsed.pitch_envelopes[0].delay, 0);
+
+        assert_eq!(parsed.events[0].kind, EVENT_PITCH_ENVELOPE_SELECT);
+        assert_eq!(parsed.events[0].value, 1);
+    }
+
+    #[test]
+    fn rejects_invalid_pitch_envelope_definition() {
+        let error = parse_mml("@p1={3000,0,-150,0}\nA c", 64).expect_err("parse error");
+
+        assert_eq!(error.error, ParseError::InvalidPitchEnvelopeDefinition);
     }
 
     #[test]

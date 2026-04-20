@@ -5,7 +5,9 @@ const a = {
   volume: 4,
   noiseOn: 5,
   noiseOff: 6,
-  envelopeSelect: 7
+  envelopeSelect: 7,
+  pan: 8,
+  pitchEnvelopeSelect: 9
 }, r = (t) => {
   const e = new Uint32Array(t.events.length * 5);
   return t.events.forEach((o, i) => {
@@ -16,20 +18,23 @@ const a = {
     ticksPerBeat: t.ticksPerBeat,
     loopCount: t.loopCount ?? 0,
     tailTicks: t.tailTicks ?? 0,
+    chipModel: t.engine ?? "sn76489",
     sequenceEvents: e,
     eventStride: 5,
-    envelopes: t.envelopes
+    envelopes: t.envelopes,
+    pitchEnvelopes: t.pitchEnvelopes ?? []
   };
 }, l = new URL(
   /* @vite-ignore */
   "./mkvdrv-processor.worklet.js",
   import.meta.url
 ).href;
-class d {
+class h {
   audioContext;
   workletNode;
   currentSong;
-  renderEngine = "an74689";
+  renderEngine = "psg";
+  chipModel = "sn76489";
   masterVolume = 1;
   wavetable;
   noteFrequencies;
@@ -40,14 +45,22 @@ class d {
   async initialize() {
     this.audioContext || (this.audioContext = new AudioContext(), await this.audioContext.audioWorklet.addModule(l)), this.workletNode || (this.workletNode = new AudioWorkletNode(
       this.audioContext,
-      "mkvdrv-processor"
+      "mkvdrv-processor",
+      {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [2],
+        channelCount: 2,
+        channelCountMode: "explicit",
+        channelInterpretation: "discrete"
+      }
     ), this.workletNode.connect(this.audioContext.destination), this.workletNode.port.postMessage(this.buildConfigureMessage()), this.workletNode.port.postMessage({
       type: "setMasterVolume",
       volume: this.masterVolume
     }));
   }
   async loadSong(e) {
-    await this.initialize(), this.currentSong = e;
+    await this.initialize(), this.currentSong = e, this.chipModel = e.engine ?? "sn76489", this.workletNode?.port.postMessage(this.buildConfigureMessage());
   }
   async loadSongFromUrl(e) {
     const s = await fetch(e);
@@ -82,10 +95,14 @@ class d {
   setRenderEngine(e) {
     this.renderEngine = e, this.workletNode?.port.postMessage(this.buildConfigureMessage());
   }
+  setChipModel(e) {
+    this.chipModel = e, this.workletNode?.port.postMessage(this.buildConfigureMessage());
+  }
   buildConfigureMessage() {
     return {
       type: "configure",
       renderEngine: this.renderEngine,
+      chipModel: this.chipModel,
       wavetable: this.wavetable,
       frequency: this.initialFrequency,
       noteFrequencies: this.noteFrequencies
@@ -104,5 +121,5 @@ const u = (t) => {
   return t;
 };
 export {
-  d as MkvdrvGameAudioEngine
+  h as MkvdrvGameAudioEngine
 };

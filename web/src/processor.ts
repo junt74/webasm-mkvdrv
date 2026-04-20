@@ -1,6 +1,7 @@
 import { MkvdrvSongRuntime } from "./song-runtime";
 import type {
   RenderEngine,
+  SoundChipModel,
   SequenceEnvelope,
   SequencePayload
 } from "./song-format";
@@ -8,6 +9,7 @@ import type {
 type ConfigureMessage = {
   type: "configure";
   renderEngine: RenderEngine;
+  chipModel: SoundChipModel;
   wavetable: Float32Array;
   frequency: number;
   noteFrequencies: Float32Array;
@@ -62,6 +64,7 @@ class MkvdrvProcessor extends AudioWorkletProcessor {
         this.port.postMessage(
           this.runtime.configure({
             renderEngine: message.renderEngine,
+            chipModel: message.chipModel,
             wavetable: message.wavetable,
             noteFrequencies: message.noteFrequencies,
             frequency: message.frequency
@@ -82,9 +85,11 @@ class MkvdrvProcessor extends AudioWorkletProcessor {
             ticksPerBeat: message.ticksPerBeat,
             loopCount: message.loopCount,
             tailTicks: message.tailTicks,
+            chipModel: message.chipModel,
             sequenceEvents: message.sequenceEvents,
             eventStride: message.eventStride,
-            envelopes: message.envelopes as SequenceEnvelope[]
+            envelopes: message.envelopes as SequenceEnvelope[],
+            pitchEnvelopes: message.pitchEnvelopes
           })
         );
         return;

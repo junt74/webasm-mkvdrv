@@ -1,6 +1,8 @@
 import type {
   RenderEngine,
+  SoundChipModel,
   SequenceEnvelope,
+  SequencePitchEnvelope,
   SequencePayload
 } from "./song-format";
 
@@ -9,10 +11,17 @@ type PlaybackMode = "idle" | "tone" | "sequence";
 type ToneChannelState = {
   phase: number;
   frequency: number;
+  baseFrequency: number;
   amplitude: number;
   targetAmplitude: number;
   baseAmplitude: number;
+  panMask: number;
   envelopeId: number;
+  pitchEnvelopeId: number;
+  pitchOffset: number;
+  pitchDelayCounter: number;
+  pitchSpeedCounter: number;
+  pitchActive: boolean;
   envelopeGain: number;
   envelopeStepIndex: number;
   envelopeSpeedCounter: number;
@@ -22,13 +31,20 @@ type ToneChannelState = {
 type NoiseChannelState = {
   phase: number;
   frequency: number;
+  baseFrequency: number;
   amplitude: number;
   targetAmplitude: number;
   lfsr: number;
   output: number;
   mode: number;
   baseAmplitude: number;
+  panMask: number;
   envelopeId: number;
+  pitchEnvelopeId: number;
+  pitchOffset: number;
+  pitchDelayCounter: number;
+  pitchSpeedCounter: number;
+  pitchActive: boolean;
   envelopeGain: number;
   envelopeStepIndex: number;
   envelopeSpeedCounter: number;
@@ -45,14 +61,20 @@ export class MkvdrvSongRuntime {
   static readonly EVENT_NOISE_ON = 5;
   static readonly EVENT_NOISE_OFF = 6;
   static readonly EVENT_ENVELOPE_SELECT = 7;
+  static readonly EVENT_PAN = 8;
+  static readonly EVENT_PITCH_ENVELOPE_SELECT = 9;
   static readonly PSG_TONE_CHANNELS = 3;
   static readonly PSG_NOISE_CHANNEL = 3;
   static readonly PSG_NOISE_MODE_PERIODIC = 0;
   static readonly PSG_NOISE_MODE_WHITE = 1;
+  static readonly PSG_PAN_RIGHT = 1;
+  static readonly PSG_PAN_LEFT = 2;
+  static readonly PSG_PAN_BOTH = 3;
 
   private wavetable = new Float32Array([0]);
   private noteFrequencies = new Float32Array(128);
-  private renderEngine: RenderEngine = "an74689";
+  private renderEngine: RenderEngine = "psg";
+  private chipModel: SoundChipModel = "sn76489";
   private sequenceEvents = new Uint32Array(0);
   private eventStride = 5;
   private previewFrequency = 440;
@@ -71,6 +93,7 @@ export class MkvdrvSongRuntime {
   private tickSamplesRemaining: number;
   private masterVolume = 1;
   private envelopes = new Map<number, SequenceEnvelope>();
+  private pitchEnvelopes = new Map<number, SequencePitchEnvelope>();
   private toneChannels: ToneChannelState[] = [];
   private noiseChannel: NoiseChannelState;
 
@@ -83,23 +106,26 @@ export class MkvdrvSongRuntime {
 
   configure({
     renderEngine,
+    chipModel,
     wavetable,
     noteFrequencies,
     frequency
   }: {
     renderEngine: RenderEngine;
+    chipModel: SoundChipModel;
     wavetable: Float32Array;
     noteFrequencies: Float32Array;
     frequency: number;
   }): string {
     this.renderEngine = renderEngine;
+    this.chipModel = chipModel;
     this.wavetable = new Float32Array(wavetable);
     this.noteFrequencies = new Float32Array(noteFrequencies);
     this.previewFrequency = frequency;
     this.resetChannels();
     this.configureTonePreviewVoices(frequency);
 
-    return `AudioWorklet ready.\nEngine: ${this.renderEngine}\nFrequency: ${this.previewFrequency.toFixed(0)} Hz`;
+    return `AudioWorklet ready.\nRenderer: ${this.renderEngine}\nChip: ${this.chipModel}\nFrequency: ${this.previewFrequency.toFixed(0)} Hz`;
   }
 
   startTone(): void {
@@ -109,6 +135,7 @@ export class MkvdrvSongRuntime {
 
   loadSequence(payload: SequencePayload): string {
     this.mode = "sequence";
+    this.chipModel = payload.chipModel;
     this.bpm = payload.bpm;
     this.ticksPerBeat = payload.ticksPerBeat;
     this.loopCount = payload.loopCount;
@@ -121,13 +148,16 @@ export class MkvdrvSongRuntime {
     this.envelopes = new Map(
       payload.envelopes.map((envelope) => [envelope.id, envelope])
     );
+    this.pitchEnvelopes = new Map(
+      payload.pitchEnvelopes.map((envelope) => [envelope.id, envelope])
+    );
     this.sequenceIndex = 0;
     this.eventSamplesRemaining = 0;
     this.pendingTerminalAction = "none";
     this.resetChannels();
     this.advanceSequenceEvent();
 
-    return `Sequence ready.\nTempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.eventStride}, loop: ${this.loopCount}`;
+    return `Sequence ready.\nChip: ${this.chipModel}\nTempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.eventStride}, loop: ${this.loopCount}`;
   }
 
   stop(): void {
@@ -170,11 +200,11 @@ export class MkvdrvSongRuntime {
     }
 
     const left = output[0];
-    const right = output[1] ?? output[0];
+    const right = output[1];
 
     if (this.wavetable.length === 0) {
       left.fill(0);
-      right.fill(0);
+      right?.fill(0);
       return true;
     }
 
@@ -212,11 +242,20 @@ export class MkvdrvSongRuntime {
 
       if (this.mode === "idle" && !hasActiveTone && !hasActiveNoise) {
         left[index] = 0;
-        right[index] = 0;
+        if (right) {
+          right[index] = 0;
+        }
       } else {
-        const sample = this.renderMixedSample() * this.masterVolume;
-        left[index] = sample;
-        right[index] = sample;
+        const frame = this.renderMixedFrame();
+        const leftSample = frame.left * this.masterVolume;
+        const rightSample = frame.right * this.masterVolume;
+
+        if (right) {
+          left[index] = leftSample;
+          right[index] = rightSample;
+        } else {
+          left[index] = (leftSample + rightSample) * 0.5;
+        }
       }
 
       if (this.mode === "sequence") {
@@ -237,10 +276,17 @@ export class MkvdrvSongRuntime {
     return {
       phase: 0,
       frequency: 0,
+      baseFrequency: 0,
       amplitude: 0,
       targetAmplitude: 0,
       baseAmplitude: 0,
+      panMask: MkvdrvSongRuntime.PSG_PAN_BOTH,
       envelopeId: 0,
+      pitchEnvelopeId: 0,
+      pitchOffset: 0,
+      pitchDelayCounter: 0,
+      pitchSpeedCounter: 0,
+      pitchActive: false,
       envelopeGain: 1,
       envelopeStepIndex: 0,
       envelopeSpeedCounter: 0,
@@ -252,13 +298,20 @@ export class MkvdrvSongRuntime {
     return {
       phase: 0,
       frequency: 0,
+      baseFrequency: 0,
       amplitude: 0,
       targetAmplitude: 0,
       lfsr: 0x4000,
       output: 1,
       mode: MkvdrvSongRuntime.PSG_NOISE_MODE_WHITE,
       baseAmplitude: 0,
+      panMask: MkvdrvSongRuntime.PSG_PAN_BOTH,
       envelopeId: 0,
+      pitchEnvelopeId: 0,
+      pitchOffset: 0,
+      pitchDelayCounter: 0,
+      pitchSpeedCounter: 0,
+      pitchActive: false,
       envelopeGain: 1,
       envelopeStepIndex: 0,
       envelopeSpeedCounter: 0,
@@ -301,13 +354,17 @@ export class MkvdrvSongRuntime {
     }
 
     channel.frequency = frequency;
+    channel.baseFrequency = frequency;
     channel.baseAmplitude = targetAmplitude;
     if (frequency <= 0 || targetAmplitude <= 0) {
       channel.envelopeActive = false;
       channel.envelopeGain = 1;
+      channel.pitchActive = false;
+      channel.pitchOffset = 0;
     }
     if (restartEnvelope) {
       this.restartToneEnvelope(channel);
+      this.restartTonePitchEnvelope(channel);
     }
     this.refreshToneTarget(channel);
   }
@@ -319,16 +376,20 @@ export class MkvdrvSongRuntime {
     restartEnvelope = false
   ) {
     this.noiseChannel.frequency = frequency;
+    this.noiseChannel.baseFrequency = frequency;
     this.noiseChannel.baseAmplitude = targetAmplitude;
     if (frequency <= 0 || targetAmplitude <= 0) {
       this.noiseChannel.envelopeActive = false;
       this.noiseChannel.envelopeGain = 1;
+      this.noiseChannel.pitchActive = false;
+      this.noiseChannel.pitchOffset = 0;
     }
     if (mode !== undefined) {
       this.noiseChannel.mode = mode;
     }
     if (restartEnvelope) {
       this.restartNoiseEnvelope();
+      this.restartNoisePitchEnvelope();
     }
     this.refreshNoiseTarget();
     if (frequency > 0) {
@@ -343,11 +404,44 @@ export class MkvdrvSongRuntime {
     if (clamped >= 15) {
       return 0;
     }
+    if (this.chipModel === "ay38910") {
+      return 10 ** (-(clamped * 1.5) / 20);
+    }
     return 10 ** (-(clamped * 2) / 20);
   }
 
   private refreshToneTarget(channel: ToneChannelState) {
     channel.targetAmplitude = channel.baseAmplitude * channel.envelopeGain;
+  }
+
+  private applyPitchOffset(baseFrequency: number, offset: number): number {
+    if (baseFrequency <= 0 || offset === 0) {
+      return baseFrequency;
+    }
+
+    return baseFrequency * 2 ** (offset / 1200);
+  }
+
+  private refreshToneFrequency(channel: ToneChannelState) {
+    channel.frequency = this.applyPitchOffset(
+      channel.baseFrequency,
+      channel.pitchOffset
+    );
+  }
+
+  private refreshNoiseFrequency() {
+    if (this.noiseChannel.baseFrequency <= 0) {
+      this.noiseChannel.frequency = 0;
+      return;
+    }
+
+    this.noiseChannel.frequency = Math.max(
+      1,
+      this.applyPitchOffset(
+        this.noiseChannel.baseFrequency,
+        this.noiseChannel.pitchOffset
+      )
+    );
   }
 
   private refreshNoiseTarget() {
@@ -387,6 +481,42 @@ export class MkvdrvSongRuntime {
     this.noiseChannel.envelopeGain = this.decodeEnvelopeGain(
       envelope.values[0] ?? 0
     );
+  }
+
+  private restartTonePitchEnvelope(channel: ToneChannelState) {
+    const envelope = this.pitchEnvelopes.get(channel.pitchEnvelopeId);
+    if (!envelope || channel.baseFrequency <= 0) {
+      channel.pitchActive = false;
+      channel.pitchOffset = 0;
+      channel.pitchDelayCounter = 0;
+      channel.pitchSpeedCounter = 0;
+      this.refreshToneFrequency(channel);
+      return;
+    }
+
+    channel.pitchActive = true;
+    channel.pitchOffset = envelope.initialOffset;
+    channel.pitchDelayCounter = envelope.delay;
+    channel.pitchSpeedCounter = 0;
+    this.refreshToneFrequency(channel);
+  }
+
+  private restartNoisePitchEnvelope() {
+    const envelope = this.pitchEnvelopes.get(this.noiseChannel.pitchEnvelopeId);
+    if (!envelope || this.noiseChannel.baseFrequency <= 0) {
+      this.noiseChannel.pitchActive = false;
+      this.noiseChannel.pitchOffset = 0;
+      this.noiseChannel.pitchDelayCounter = 0;
+      this.noiseChannel.pitchSpeedCounter = 0;
+      this.refreshNoiseFrequency();
+      return;
+    }
+
+    this.noiseChannel.pitchActive = true;
+    this.noiseChannel.pitchOffset = envelope.initialOffset;
+    this.noiseChannel.pitchDelayCounter = envelope.delay;
+    this.noiseChannel.pitchSpeedCounter = 0;
+    this.refreshNoiseFrequency();
   }
 
   private advanceChannelEnvelope(channel: ToneChannelState | NoiseChannelState) {
@@ -434,12 +564,70 @@ export class MkvdrvSongRuntime {
     );
   }
 
+  private advanceTonePitchEnvelope(channel: ToneChannelState) {
+    if (!channel.pitchActive || channel.pitchEnvelopeId === 0) {
+      return;
+    }
+
+    const envelope = this.pitchEnvelopes.get(channel.pitchEnvelopeId);
+    if (!envelope) {
+      channel.pitchActive = false;
+      channel.pitchOffset = 0;
+      this.refreshToneFrequency(channel);
+      return;
+    }
+
+    if (channel.pitchDelayCounter > 0) {
+      channel.pitchDelayCounter -= 1;
+      return;
+    }
+
+    channel.pitchSpeedCounter += 1;
+    if (channel.pitchSpeedCounter < envelope.speed) {
+      return;
+    }
+
+    channel.pitchSpeedCounter = 0;
+    channel.pitchOffset += envelope.step;
+    this.refreshToneFrequency(channel);
+  }
+
+  private advanceNoisePitchEnvelope() {
+    if (!this.noiseChannel.pitchActive || this.noiseChannel.pitchEnvelopeId === 0) {
+      return;
+    }
+
+    const envelope = this.pitchEnvelopes.get(this.noiseChannel.pitchEnvelopeId);
+    if (!envelope) {
+      this.noiseChannel.pitchActive = false;
+      this.noiseChannel.pitchOffset = 0;
+      this.refreshNoiseFrequency();
+      return;
+    }
+
+    if (this.noiseChannel.pitchDelayCounter > 0) {
+      this.noiseChannel.pitchDelayCounter -= 1;
+      return;
+    }
+
+    this.noiseChannel.pitchSpeedCounter += 1;
+    if (this.noiseChannel.pitchSpeedCounter < envelope.speed) {
+      return;
+    }
+
+    this.noiseChannel.pitchSpeedCounter = 0;
+    this.noiseChannel.pitchOffset += envelope.step;
+    this.refreshNoiseFrequency();
+  }
+
   private advanceEnvelopeTick() {
     this.toneChannels.forEach((channel) => {
       this.advanceChannelEnvelope(channel);
+      this.advanceTonePitchEnvelope(channel);
       this.refreshToneTarget(channel);
     });
     this.advanceChannelEnvelope(this.noiseChannel);
+    this.advanceNoisePitchEnvelope();
     this.refreshNoiseTarget();
   }
 
@@ -451,7 +639,8 @@ export class MkvdrvSongRuntime {
     }
 
     const attenuationSteps = 15 - clamped;
-    return 10 ** (-(attenuationSteps * 2) / 20);
+    const dbPerStep = this.chipModel === "ay38910" ? 1.5 : 2;
+    return 10 ** (-(attenuationSteps * dbPerStep) / 20);
   }
 
   private decodeNoiseParam(param: number): { volume: number; mode: number } {
@@ -468,20 +657,47 @@ export class MkvdrvSongRuntime {
     };
   }
 
+  private normalizePanMask(panMask: number): number {
+    return panMask & MkvdrvSongRuntime.PSG_PAN_BOTH;
+  }
+
+  private applyPanLevel(
+    panMask: number,
+    sample: number
+  ): { left: number; right: number } {
+    const normalized = this.normalizePanMask(panMask);
+    return {
+      left:
+        (normalized & MkvdrvSongRuntime.PSG_PAN_LEFT) !== 0 ? sample : 0,
+      right:
+        (normalized & MkvdrvSongRuntime.PSG_PAN_RIGHT) !== 0 ? sample : 0
+    };
+  }
+
   private configureTonePreviewVoices(frequency: number) {
     const previewFrequencies = [frequency, frequency * 1.5, frequency * 2];
 
     this.toneChannels.forEach((channel, index) => {
       channel.frequency = previewFrequencies[index] ?? frequency;
+      channel.baseFrequency = previewFrequencies[index] ?? frequency;
       channel.baseAmplitude = this.decodePsgAmplitude(15);
+      channel.panMask = MkvdrvSongRuntime.PSG_PAN_BOTH;
       channel.envelopeId = 0;
+      channel.pitchEnvelopeId = 0;
+      channel.pitchOffset = 0;
+      channel.pitchActive = false;
       channel.envelopeGain = 1;
       channel.envelopeActive = false;
       this.refreshToneTarget(channel);
     });
     this.noiseChannel.frequency = 0;
+    this.noiseChannel.baseFrequency = 0;
     this.noiseChannel.baseAmplitude = 0;
     this.noiseChannel.targetAmplitude = 0;
+    this.noiseChannel.panMask = MkvdrvSongRuntime.PSG_PAN_BOTH;
+    this.noiseChannel.pitchEnvelopeId = 0;
+    this.noiseChannel.pitchOffset = 0;
+    this.noiseChannel.pitchActive = false;
   }
 
   private advanceSequenceEvent() {
@@ -547,6 +763,31 @@ export class MkvdrvSongRuntime {
           this.restartNoiseEnvelope();
           this.refreshNoiseTarget();
         }
+      }
+    } else if (eventKind === MkvdrvSongRuntime.EVENT_PITCH_ENVELOPE_SELECT) {
+      if (channel < MkvdrvSongRuntime.PSG_TONE_CHANNELS) {
+        const toneChannel = this.toneChannels[channel];
+        if (toneChannel) {
+          toneChannel.pitchEnvelopeId = value;
+          if (toneChannel.baseFrequency > 0) {
+            this.restartTonePitchEnvelope(toneChannel);
+          }
+        }
+      } else if (channel === MkvdrvSongRuntime.PSG_NOISE_CHANNEL) {
+        this.noiseChannel.pitchEnvelopeId = value;
+        if (this.noiseChannel.baseFrequency > 0) {
+          this.restartNoisePitchEnvelope();
+        }
+      }
+    } else if (eventKind === MkvdrvSongRuntime.EVENT_PAN) {
+      const panMask = this.normalizePanMask(value);
+      if (channel < MkvdrvSongRuntime.PSG_TONE_CHANNELS) {
+        const toneChannel = this.toneChannels[channel];
+        if (toneChannel) {
+          toneChannel.panMask = panMask;
+        }
+      } else if (channel === MkvdrvSongRuntime.PSG_NOISE_CHANNEL) {
+        this.noiseChannel.panMask = panMask;
       }
     } else if (eventKind === MkvdrvSongRuntime.EVENT_NOISE_ON) {
       this.setNoiseChannel(
@@ -683,9 +924,26 @@ export class MkvdrvSongRuntime {
   }
 
   private renderPsgToneChannel(channel: ToneChannelState): number {
+    if (this.chipModel === "ay38910") {
+      return this.renderAyToneChannel(channel);
+    }
+
     const phaseStep = channel.frequency / this.sampleRateValue;
     const cyclePhase = channel.phase - Math.floor(channel.phase);
     const sample = cyclePhase < 0.5 ? 1 : -1;
+
+    channel.phase += phaseStep;
+    if (channel.phase >= 1) {
+      channel.phase -= Math.floor(channel.phase);
+    }
+
+    return sample;
+  }
+
+  private renderAyToneChannel(channel: ToneChannelState): number {
+    const phaseStep = channel.frequency / this.sampleRateValue;
+    const cyclePhase = channel.phase - Math.floor(channel.phase);
+    const sample = cyclePhase < 0.5 ? 0.85 : -0.85;
 
     channel.phase += phaseStep;
     if (channel.phase >= 1) {
@@ -710,8 +968,8 @@ export class MkvdrvSongRuntime {
     while (this.noiseChannel.phase >= 1) {
       const feedbackBit =
         this.noiseChannel.mode === MkvdrvSongRuntime.PSG_NOISE_MODE_PERIODIC
-          ? this.noiseChannel.lfsr & 1
-          : (this.noiseChannel.lfsr ^ (this.noiseChannel.lfsr >> 1)) & 1;
+          ? this.periodicNoiseFeedbackBit()
+          : this.whiteNoiseFeedbackBit();
       const feedback = feedbackBit << 14;
       this.noiseChannel.lfsr = (this.noiseChannel.lfsr >> 1) | feedback;
       this.noiseChannel.output = this.noiseChannel.lfsr & 1 ? 1 : -1;
@@ -722,11 +980,35 @@ export class MkvdrvSongRuntime {
       this.noiseChannel.amplitude,
       this.noiseChannel.targetAmplitude
     );
-    return this.noiseChannel.output * this.noiseChannel.amplitude * 0.1;
+    const noiseLevel = this.chipModel === "ay38910" ? 0.07 : 0.1;
+    return this.noiseChannel.output * this.noiseChannel.amplitude * noiseLevel;
   }
 
-  private renderMixedSample(): number {
-    let mix = 0;
+  private periodicNoiseFeedbackBit(): number {
+    if (this.chipModel === "ay38910") {
+      return (this.noiseChannel.lfsr >> 3) & 1;
+    }
+
+    return this.noiseChannel.lfsr & 1;
+  }
+
+  private whiteNoiseFeedbackBit(): number {
+    if (this.chipModel === "ay38910") {
+      return (
+        (this.noiseChannel.lfsr ^
+          (this.noiseChannel.lfsr >> 2) ^
+          (this.noiseChannel.lfsr >> 3) ^
+          (this.noiseChannel.lfsr >> 5)) &
+        1
+      );
+    }
+
+    return (this.noiseChannel.lfsr ^ (this.noiseChannel.lfsr >> 1)) & 1;
+  }
+
+  private renderMixedFrame(): { left: number; right: number } {
+    let left = 0;
+    let right = 0;
 
     this.toneChannels.forEach((channel) => {
       channel.amplitude = this.updateEnvelope(
@@ -739,17 +1021,35 @@ export class MkvdrvSongRuntime {
       }
 
       const sample =
-        this.renderEngine === "an74689"
+        this.renderEngine === "psg"
           ? this.renderPsgToneChannel(channel)
           : this.renderSineChannel(channel);
-      const outputLevel = this.renderEngine === "an74689" ? 0.12 : 0.22;
-      mix += sample * channel.amplitude * outputLevel;
+      const outputLevel =
+        this.renderEngine === "psg"
+          ? this.chipModel === "ay38910"
+            ? 0.1
+            : 0.12
+          : 0.22;
+      const panned = this.applyPanLevel(
+        channel.panMask,
+        sample * channel.amplitude * outputLevel
+      );
+      left += panned.left;
+      right += panned.right;
     });
 
-    if (this.renderEngine === "an74689") {
-      mix += this.renderNoiseChannel();
+    if (this.renderEngine === "psg") {
+      const pannedNoise = this.applyPanLevel(
+        this.noiseChannel.panMask,
+        this.renderNoiseChannel()
+      );
+      left += pannedNoise.left;
+      right += pannedNoise.right;
     }
 
-    return mix / 4;
+    return {
+      left: left / 4,
+      right: right / 4
+    };
   }
 }

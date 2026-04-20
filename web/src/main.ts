@@ -3,7 +3,9 @@ import processorUrl from "./processor.ts?url";
 import type {
   ExportedSong,
   RenderEngine,
-  SequenceEnvelope
+  SoundChipModel,
+  SequenceEnvelope,
+  SequencePitchEnvelope
 } from "./song-format";
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -35,10 +37,17 @@ app.innerHTML = `
             <strong id="branch-index-value">branch 0</strong>
           </label>
           <label class="control control-compact">
-            <span>Sound Engine</span>
+            <span>Renderer</span>
             <select id="render-engine" class="sample-select">
-              <option value="an74689">AN74689 PSG</option>
+              <option value="psg">PSG</option>
               <option value="sine">Sine Test</option>
+            </select>
+          </label>
+          <label class="control control-compact">
+            <span>Chip Model</span>
+            <select id="chip-model" class="sample-select">
+              <option value="sn76489">SN76489</option>
+              <option value="ay38910">AY-3-8910</option>
             </select>
           </label>
           <label class="control">
@@ -159,6 +168,9 @@ type MkvdrvWasmExports = {
   mkvdrv_envelope_definition_values_ptr: () => number;
   mkvdrv_envelope_definition_header_stride: () => number;
   mkvdrv_envelope_definition_value_stride: () => number;
+  mkvdrv_pitch_envelope_definition_count: () => number;
+  mkvdrv_pitch_envelope_definition_headers_ptr: () => number;
+  mkvdrv_pitch_envelope_definition_header_stride: () => number;
   mkvdrv_fill_demo_sequence: () => number;
   mkvdrv_mml_input_buffer_ptr: () => number;
   mkvdrv_mml_input_buffer_capacity: () => number;
@@ -200,6 +212,7 @@ type WasmRuntime = {
   sequenceLoopCount: number;
   sequenceTailTicks: number;
   envelopes: SequenceEnvelope[];
+  pitchEnvelopes: SequencePitchEnvelope[];
 };
 
 let runtimePromise: Promise<WasmRuntime> | undefined;
@@ -290,6 +303,8 @@ const branchIndexValue =
   document.querySelector<HTMLElement>("#branch-index-value");
 const renderEngineSelect =
   document.querySelector<HTMLSelectElement>("#render-engine");
+const chipModelSelect =
+  document.querySelector<HTMLSelectElement>("#chip-model");
 const sampleSelect = document.querySelector<HTMLSelectElement>("#mml-sample");
 const envelopeShortcutSelect = document.querySelector<HTMLSelectElement>(
   "#envelope-shortcut"
@@ -467,7 +482,22 @@ const loadRuntime = async (): Promise<WasmRuntime> => {
         sequenceBpm,
         sequenceLoopCount,
         sequenceTailTicks,
-        envelopes: []
+        envelopes: [],
+        pitchEnvelopes: []
+      });
+      const pitchEnvelopes = readPitchEnvelopeDefinitions({
+        exports,
+        message,
+        wavetable,
+        noteFrequencies,
+        sequenceEvents,
+        sequenceEventStride: eventStride,
+        sequenceTicksPerBeat,
+        sequenceBpm,
+        sequenceLoopCount,
+        sequenceTailTicks,
+        envelopes: [],
+        pitchEnvelopes: []
       });
 
       return {
@@ -481,7 +511,8 @@ const loadRuntime = async (): Promise<WasmRuntime> => {
         sequenceBpm,
         sequenceLoopCount,
         sequenceTailTicks,
-        envelopes
+        envelopes,
+        pitchEnvelopes
       };
     })();
   }
@@ -502,7 +533,10 @@ const currentBranchIndex = (): number => {
 };
 
 const currentRenderEngine = (): RenderEngine =>
-  (renderEngineSelect?.value as RenderEngine | undefined) ?? "an74689";
+  (renderEngineSelect?.value as RenderEngine | undefined) ?? "psg";
+
+const currentChipModel = (): SoundChipModel =>
+  (chipModelSelect?.value as SoundChipModel | undefined) ?? "sn76489";
 
 const updateBranchLabel = () => {
   if (branchIndexValue) {
@@ -553,7 +587,7 @@ const tokenizeMmlCharClass = (source: string, index: number): string => {
     return "mml-token-note";
   }
 
-  if ("trlqoCQRT".includes(character)) {
+  if ("trlqopwSCQRT".includes(character)) {
     return "mml-token-command";
   }
 
@@ -1087,7 +1121,14 @@ const ensureAudioNode = async (): Promise<AudioWorkletNode> => {
   }
 
   if (!workletNode) {
-    workletNode = new AudioWorkletNode(audioContext, "mkvdrv-processor");
+    workletNode = new AudioWorkletNode(audioContext, "mkvdrv-processor", {
+      numberOfInputs: 0,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+      channelCount: 2,
+      channelCountMode: "explicit",
+      channelInterpretation: "discrete"
+    });
     workletNode.connect(audioContext.destination);
 
     workletNode.port.onmessage = (event: MessageEvent<string>) => {
@@ -1144,6 +1185,30 @@ const readEnvelopeDefinitions = (runtime: WasmRuntime): SequenceEnvelope[] => {
   });
 };
 
+const readPitchEnvelopeDefinitions = (
+  runtime: WasmRuntime
+): SequencePitchEnvelope[] => {
+  const count = runtime.exports.mkvdrv_pitch_envelope_definition_count();
+  const headerStride = runtime.exports.mkvdrv_pitch_envelope_definition_header_stride();
+  const headerPointer = runtime.exports.mkvdrv_pitch_envelope_definition_headers_ptr();
+  const headerSource = new Int32Array(
+    runtime.exports.memory.buffer,
+    headerPointer,
+    count * headerStride
+  );
+
+  return Array.from({ length: count }, (_, index) => {
+    const headerBase = index * headerStride;
+    return {
+      id: headerSource[headerBase] ?? 0,
+      initialOffset: headerSource[headerBase + 1] ?? 0,
+      speed: headerSource[headerBase + 2] ?? 1,
+      step: headerSource[headerBase + 3] ?? 0,
+      delay: headerSource[headerBase + 4] ?? 0
+    };
+  });
+};
+
 const readExportedSongJson = (runtime: WasmRuntime): string => {
   const pointer = runtime.exports.mkvdrv_exported_song_json_ptr();
   const length = runtime.exports.mkvdrv_exported_song_json_len();
@@ -1161,6 +1226,7 @@ const parseMmlText = (
 ): {
   sequenceEvents: Uint32Array;
   envelopes: SequenceEnvelope[];
+  pitchEnvelopes: SequencePitchEnvelope[];
   bpm: number;
   ticksPerBeat: number;
   loopCount: number;
@@ -1222,6 +1288,7 @@ const parseMmlText = (
   return {
     sequenceEvents: readSequenceEvents(runtime, eventCount),
     envelopes: readEnvelopeDefinitions(runtime),
+    pitchEnvelopes: readPitchEnvelopeDefinitions(runtime),
     bpm: runtime.exports.mkvdrv_sequence_bpm(),
     ticksPerBeat: runtime.exports.mkvdrv_sequence_ticks_per_beat(),
     loopCount: runtime.exports.mkvdrv_sequence_loop_count(),
@@ -1289,8 +1356,9 @@ const exportMmlSongJson = (
     );
   }
 
-  const exported = readExportedSongJson(runtime);
-  return JSON.parse(exported) as ExportedSong;
+  const exported = JSON.parse(readExportedSongJson(runtime)) as ExportedSong;
+  exported.engine = currentChipModel();
+  return exported;
 };
 
 const configureNode = (
@@ -1300,6 +1368,7 @@ const configureNode = (
   node.port.postMessage({
     type: "configure",
     renderEngine: currentRenderEngine(),
+    chipModel: currentChipModel(),
     wavetable: runtime.wavetable,
     frequency: PREVIEW_FREQUENCY,
     noteFrequencies: runtime.noteFrequencies
@@ -1332,7 +1401,7 @@ const boot = async () => {
       updateBranchLabel();
     }
     updateLog(
-      `${runtime.message}\nSound engine: ${currentRenderEngine()}\nWavetable length: ${runtime.wavetable.length} samples\nNote table: ${runtime.noteFrequencies.length} entries\nDemo sequence events: ${runtime.sequenceEvents.length / runtime.sequenceEventStride}\nEnvelope defs: ${runtime.envelopes.length}`
+      `${runtime.message}\nRenderer: ${currentRenderEngine()}\nChip model: ${currentChipModel()}\nWavetable length: ${runtime.wavetable.length} samples\nNote table: ${runtime.noteFrequencies.length} entries\nDemo sequence events: ${runtime.sequenceEvents.length / runtime.sequenceEventStride}\nEnvelope defs: ${runtime.envelopes.length}`
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -1351,7 +1420,7 @@ startButton?.addEventListener("click", async () => {
     node.port.postMessage({ type: "startTone" });
 
     updateLog(
-      `${runtime.message}\nSound engine: ${currentRenderEngine()}\nTone playback started at ${PREVIEW_FREQUENCY.toFixed(0)} Hz`
+      `${runtime.message}\nRenderer: ${currentRenderEngine()}\nChip model: ${currentChipModel()}\nTone playback started at ${PREVIEW_FREQUENCY.toFixed(0)} Hz`
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -1375,11 +1444,12 @@ sequenceButton?.addEventListener("click", async () => {
       tailTicks: runtime.sequenceTailTicks,
       sequenceEvents: runtime.sequenceEvents,
       eventStride: runtime.sequenceEventStride,
-      envelopes: runtime.envelopes
+      envelopes: runtime.envelopes,
+      pitchEnvelopes: runtime.pitchEnvelopes
     });
 
     updateLog(
-      `${runtime.message}\nSound engine: ${currentRenderEngine()}\nRust demo sequence started at ${runtime.sequenceBpm.toFixed(0)} BPM\nLoop count: ${runtime.sequenceLoopCount}\nTail ticks: ${runtime.sequenceTailTicks}`
+      `${runtime.message}\nRenderer: ${currentRenderEngine()}\nChip model: ${currentChipModel()}\nRust demo sequence started at ${runtime.sequenceBpm.toFixed(0)} BPM\nLoop count: ${runtime.sequenceLoopCount}\nTail ticks: ${runtime.sequenceTailTicks}`
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -1396,7 +1466,15 @@ mmlButton?.addEventListener("click", async () => {
 
     configureNode(node, runtime);
     const source = mmlInput?.value ?? "";
-    const { sequenceEvents, envelopes, bpm, ticksPerBeat, loopCount, tailTicks } = parseMmlText(
+    const {
+      sequenceEvents,
+      envelopes,
+      pitchEnvelopes,
+      bpm,
+      ticksPerBeat,
+      loopCount,
+      tailTicks
+    } = parseMmlText(
       runtime,
       source
     );
@@ -1409,11 +1487,12 @@ mmlButton?.addEventListener("click", async () => {
       tailTicks,
       sequenceEvents,
       eventStride: runtime.sequenceEventStride,
-      envelopes
+      envelopes,
+      pitchEnvelopes
     });
 
     updateLog(
-      `${runtime.message}\nSound engine: ${currentRenderEngine()}\nParsed MML events: ${sequenceEvents.length / runtime.sequenceEventStride}\nTempo: ${bpm} BPM\nTicks/Beat: ${ticksPerBeat}\nLoop count: ${loopCount}\nTail ticks: ${tailTicks}\nEnvelope defs: ${envelopes.length}\nPlayback started from MML input.`
+      `${runtime.message}\nRenderer: ${currentRenderEngine()}\nChip model: ${currentChipModel()}\nParsed MML events: ${sequenceEvents.length / runtime.sequenceEventStride}\nTempo: ${bpm} BPM\nTicks/Beat: ${ticksPerBeat}\nLoop count: ${loopCount}\nTail ticks: ${tailTicks}\nEnvelope defs: ${envelopes.length}\nPlayback started from MML input.`
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -1459,11 +1538,25 @@ renderEngineSelect?.addEventListener("change", async () => {
     const node = await ensureAudioNode();
     configureNode(node, runtime);
     updateLog(
-      `${runtime.message}\nSound engine switched to ${currentRenderEngine()}.`
+      `${runtime.message}\nRenderer switched to ${currentRenderEngine()}.\nChip model: ${currentChipModel()}`
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    updateLog(`Failed to switch sound engine.\n${reason}`);
+    updateLog(`Failed to switch renderer.\n${reason}`);
+  }
+});
+
+chipModelSelect?.addEventListener("change", async () => {
+  try {
+    const runtime = await loadRuntime();
+    const node = await ensureAudioNode();
+    configureNode(node, runtime);
+    updateLog(
+      `${runtime.message}\nRenderer: ${currentRenderEngine()}\nChip model switched to ${currentChipModel()}.`
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    updateLog(`Failed to switch chip model.\n${reason}`);
   }
 });
 
