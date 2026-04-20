@@ -4,7 +4,7 @@ const DEFAULT_TICKS_PER_BEAT: u32 = 24;
 const DEFAULT_TICKS_PER_WHOLE: u32 = DEFAULT_TICKS_PER_BEAT * 4;
 const DEFAULT_NOTE_LENGTH: u32 = DEFAULT_TICKS_PER_WHOLE / 4;
 const DEFAULT_TEMPO_BPM: u32 = 120;
-const MML_OCTAVE_OFFSET: i32 = -1;
+const MML_OCTAVE_OFFSET: i32 = 0;
 const DEFAULT_QUANTIZE_NUMERATOR: u32 = 8;
 const DEFAULT_QUANTIZE_DENOMINATOR: u32 = 8;
 const PSG_CHANNEL_COUNT: usize = 4;
@@ -1813,9 +1813,9 @@ mod tests {
     fn parses_basic_scale() {
         let parsed = parse_mml("o4 l4 cdefgab>c", 64).expect("parse ok");
 
-        assert_eq!(parsed.events[0], note_on(36, 24));
-        assert_eq!(parsed.events[2], note_on(38, 24));
-        assert_eq!(parsed.events[14], note_on(48, 24));
+        assert_eq!(parsed.events[0], note_on(48, 24));
+        assert_eq!(parsed.events[2], note_on(50, 24));
+        assert_eq!(parsed.events[14], note_on(60, 24));
     }
 
     #[test]
@@ -1823,10 +1823,10 @@ mod tests {
         let parsed = parse_mml("t150 o4 l8 c r d", 64).expect("parse ok");
 
         assert_eq!(parsed.events[0], tempo(150));
-        assert_eq!(parsed.events[1], note_on(36, 12));
+        assert_eq!(parsed.events[1], note_on(48, 12));
         assert_eq!(parsed.events[3], note_off(0, 12));
-        assert_eq!(parsed.events[4], note_on(38, 12));
-        assert_eq!(parsed.events[5], note_off(38, 0));
+        assert_eq!(parsed.events[4], note_on(50, 12));
+        assert_eq!(parsed.events[5], note_off(50, 0));
     }
 
     #[test]
@@ -1852,10 +1852,10 @@ mod tests {
     fn parses_sharp_with_plus() {
         let parsed = parse_mml("t124 o6 l16 c+ d f+ a+", 64).expect("parse ok");
 
-        assert_eq!(parsed.events[1], note_on(61, 6));
-        assert_eq!(parsed.events[3], note_on(62, 6));
-        assert_eq!(parsed.events[5], note_on(66, 6));
-        assert_eq!(parsed.events[7], note_on(70, 6));
+        assert_eq!(parsed.events[1], note_on(73, 6));
+        assert_eq!(parsed.events[3], note_on(74, 6));
+        assert_eq!(parsed.events[5], note_on(78, 6));
+        assert_eq!(parsed.events[7], note_on(82, 6));
     }
 
     #[test]
@@ -1863,7 +1863,7 @@ mod tests {
         let parsed = parse_mml("o4 l8 c~c+:3", 16).expect("parse ok");
 
         assert_eq!(parsed.events[2].kind, EVENT_NOTE_ON);
-        assert_eq!(parsed.events[2].value, 37);
+        assert_eq!(parsed.events[2].value, 49);
         assert_eq!(parsed.events[2].length_ticks, 3);
     }
 
@@ -1872,12 +1872,12 @@ mod tests {
         let parsed = parse_mml("A o4 l8 c\nB o3 l8 g\nC o2 l8 c", 64).expect("parse ok");
 
         assert_eq!(parsed.events[0].channel, 0);
-        assert_eq!(parsed.events[0].value, 36);
+        assert_eq!(parsed.events[0].value, 48);
         assert_eq!(parsed.events[0].param, PSG_DEFAULT_VOLUME);
         assert_eq!(parsed.events[2].channel, 1);
-        assert_eq!(parsed.events[2].value, 31);
+        assert_eq!(parsed.events[2].value, 43);
         assert_eq!(parsed.events[4].channel, 2);
-        assert_eq!(parsed.events[4].value, 12);
+        assert_eq!(parsed.events[4].value, 24);
     }
 
     #[test]
@@ -2111,7 +2111,7 @@ mod tests {
         assert_eq!(parsed.events[0].length_ticks, 9);
         assert_eq!(parsed.events[1].length_ticks, 0);
         assert_eq!(parsed.events[2].kind, EVENT_NOTE_ON);
-        assert_eq!(parsed.events[2].value, 38);
+        assert_eq!(parsed.events[2].value, 50);
         assert_eq!(parsed.events[2].length_ticks, 3);
         assert_eq!(parsed.events[3].kind, EVENT_NOTE_OFF);
         assert_eq!(parsed.events[3].length_ticks, 0);
@@ -2122,9 +2122,9 @@ mod tests {
         let parsed = parse_mml("o4 [c]3", 32).expect("parse ok");
 
         assert_eq!(parsed.events.len(), 6);
-        assert_eq!(parsed.events[0].value, 36);
-        assert_eq!(parsed.events[2].value, 36);
-        assert_eq!(parsed.events[4].value, 36);
+        assert_eq!(parsed.events[0].value, 48);
+        assert_eq!(parsed.events[2].value, 48);
+        assert_eq!(parsed.events[4].value, 48);
     }
 
     #[test]
@@ -2132,11 +2132,11 @@ mod tests {
         let parsed = parse_mml("o4 [c/d]3", 64).expect("parse ok");
 
         assert_eq!(parsed.events.len(), 10);
-        assert_eq!(parsed.events[0].value, 36);
-        assert_eq!(parsed.events[2].value, 38);
-        assert_eq!(parsed.events[4].value, 36);
-        assert_eq!(parsed.events[6].value, 38);
-        assert_eq!(parsed.events[8].value, 36);
+        assert_eq!(parsed.events[0].value, 48);
+        assert_eq!(parsed.events[2].value, 50);
+        assert_eq!(parsed.events[4].value, 48);
+        assert_eq!(parsed.events[6].value, 50);
+        assert_eq!(parsed.events[8].value, 48);
     }
 
     #[test]
@@ -2144,9 +2144,9 @@ mod tests {
         let parsed = parse_mml("o4 c{d/e/f}g", 32).expect("parse ok");
 
         assert_eq!(parsed.events.len(), 6);
-        assert_eq!(parsed.events[0].value, 36);
-        assert_eq!(parsed.events[2].value, 38);
-        assert_eq!(parsed.events[4].value, 43);
+        assert_eq!(parsed.events[0].value, 48);
+        assert_eq!(parsed.events[2].value, 50);
+        assert_eq!(parsed.events[4].value, 55);
     }
 
     #[test]
@@ -2154,9 +2154,9 @@ mod tests {
         let parsed = parse_mml_with_context("o4 c{d/e/f}g", 32, 2).expect("parse ok");
 
         assert_eq!(parsed.events.len(), 6);
-        assert_eq!(parsed.events[0].value, 36);
-        assert_eq!(parsed.events[2].value, 41);
-        assert_eq!(parsed.events[4].value, 43);
+        assert_eq!(parsed.events[0].value, 48);
+        assert_eq!(parsed.events[2].value, 53);
+        assert_eq!(parsed.events[4].value, 55);
     }
 
     #[test]

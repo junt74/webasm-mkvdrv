@@ -5,6 +5,16 @@ import type {
   SequencePitchEnvelope,
   SequencePayload
 } from "./song-format";
+import { getPsgChipCore } from "./chips";
+import type { PsgNoiseFrequencyMode } from "./chips/psg-types";
+import {
+  createSn76489RegisterState,
+  resolveSn76489NoiseState,
+  writeSn76489NoiseControl,
+  writeSn76489TonePeriod,
+  writeSn76489Volume,
+  type Sn76489RegisterState
+} from "./chips/sn76489-core";
 
 type PlaybackMode = "idle" | "tone" | "sequence";
 
@@ -12,6 +22,9 @@ type ToneChannelState = {
   phase: number;
   frequency: number;
   baseFrequency: number;
+  tonePeriod: number;
+  baseTonePeriod: number;
+  volumeRegister: number;
   amplitude: number;
   targetAmplitude: number;
   baseAmplitude: number;
@@ -32,6 +45,11 @@ type NoiseChannelState = {
   phase: number;
   frequency: number;
   baseFrequency: number;
+  noisePeriod: number;
+  baseNoisePeriod: number;
+  frequencyMode: PsgNoiseFrequencyMode;
+  volumeRegister: number;
+  noiseControlRegister: number;
   amplitude: number;
   targetAmplitude: number;
   lfsr: number;
@@ -96,12 +114,17 @@ export class MkvdrvSongRuntime {
   private pitchEnvelopes = new Map<number, SequencePitchEnvelope>();
   private toneChannels: ToneChannelState[] = [];
   private noiseChannel: NoiseChannelState;
+  private sn76489Registers: Sn76489RegisterState = createSn76489RegisterState();
 
   constructor(private readonly sampleRateValue: number) {
     this.samplesPerTick = sampleRateValue / 192;
     this.tickSamplesRemaining = this.samplesPerTick;
     this.noiseChannel = this.createNoiseChannel();
     this.resetChannels();
+  }
+
+  private get chipCore() {
+    return getPsgChipCore(this.chipModel);
   }
 
   configure({
@@ -277,6 +300,9 @@ export class MkvdrvSongRuntime {
       phase: 0,
       frequency: 0,
       baseFrequency: 0,
+      tonePeriod: 0,
+      baseTonePeriod: 0,
+      volumeRegister: 0,
       amplitude: 0,
       targetAmplitude: 0,
       baseAmplitude: 0,
@@ -299,6 +325,15 @@ export class MkvdrvSongRuntime {
       phase: 0,
       frequency: 0,
       baseFrequency: 0,
+      noisePeriod: 0,
+      baseNoisePeriod: 0,
+      frequencyMode: {
+        kind: "continuous",
+        frequency: 0,
+        period: 0
+      },
+      volumeRegister: 0,
+      noiseControlRegister: MkvdrvSongRuntime.PSG_NOISE_MODE_WHITE,
       amplitude: 0,
       targetAmplitude: 0,
       lfsr: 0x4000,
@@ -325,6 +360,7 @@ export class MkvdrvSongRuntime {
       () => this.createToneChannel()
     );
     this.noiseChannel = this.createNoiseChannel();
+    this.sn76489Registers = createSn76489RegisterState();
   }
 
   private silenceAllChannels() {
@@ -332,20 +368,49 @@ export class MkvdrvSongRuntime {
       channel.targetAmplitude = 0;
       channel.baseAmplitude = 0;
       channel.frequency = 0;
+      channel.tonePeriod = 0;
+      channel.baseTonePeriod = 0;
+      channel.volumeRegister = 0;
       channel.envelopeActive = false;
       channel.envelopeGain = 1;
     });
     this.noiseChannel.targetAmplitude = 0;
     this.noiseChannel.baseAmplitude = 0;
     this.noiseChannel.frequency = 0;
+    this.noiseChannel.noisePeriod = 0;
+    this.noiseChannel.baseNoisePeriod = 0;
+    this.noiseChannel.frequencyMode = {
+      kind: "continuous",
+      frequency: 0,
+      period: 0
+    };
+    this.noiseChannel.volumeRegister = 0;
+    this.noiseChannel.noiseControlRegister =
+      MkvdrvSongRuntime.PSG_NOISE_MODE_WHITE;
     this.noiseChannel.envelopeActive = false;
     this.noiseChannel.envelopeGain = 1;
+  }
+
+  private normalizeVolumeRegister(value: number): number {
+    return Math.max(0, Math.min(15, Math.round(value)));
+  }
+
+  private applyToneVolumeRegister(channel: ToneChannelState, value: number) {
+    channel.volumeRegister = this.normalizeVolumeRegister(value);
+    channel.baseAmplitude = this.decodePsgAmplitude(channel.volumeRegister);
+  }
+
+  private applyNoiseVolumeRegister(value: number) {
+    this.noiseChannel.volumeRegister = this.normalizeVolumeRegister(value);
+    this.noiseChannel.baseAmplitude = this.decodePsgAmplitude(
+      this.noiseChannel.volumeRegister
+    );
   }
 
   private setToneChannel(
     channelIndex: number,
     frequency: number,
-    targetAmplitude: number,
+    volumeRegister: number,
     restartEnvelope = false
   ) {
     const channel = this.toneChannels[channelIndex];
@@ -353,14 +418,31 @@ export class MkvdrvSongRuntime {
       return;
     }
 
-    channel.frequency = frequency;
     channel.baseFrequency = frequency;
-    channel.baseAmplitude = targetAmplitude;
-    if (frequency <= 0 || targetAmplitude <= 0) {
+    channel.baseTonePeriod = this.chipCore.tonePeriodFromFrequency(frequency);
+    if (this.chipModel === "sn76489" && channelIndex <= 2) {
+      this.sn76489Registers = writeSn76489TonePeriod(
+        this.sn76489Registers,
+        channelIndex as 0 | 1 | 2,
+        channel.baseTonePeriod
+      );
+      this.sn76489Registers = writeSn76489Volume(
+        this.sn76489Registers,
+        channelIndex as 0 | 1 | 2,
+        volumeRegister
+      );
+    }
+    this.applyToneVolumeRegister(channel, volumeRegister);
+    if (frequency <= 0 || channel.volumeRegister <= 0) {
+      channel.frequency = 0;
+      channel.tonePeriod = 0;
+      channel.baseTonePeriod = 0;
       channel.envelopeActive = false;
       channel.envelopeGain = 1;
       channel.pitchActive = false;
       channel.pitchOffset = 0;
+    } else {
+      this.refreshToneFrequency(channel);
     }
     if (restartEnvelope) {
       this.restartToneEnvelope(channel);
@@ -371,21 +453,46 @@ export class MkvdrvSongRuntime {
 
   private setNoiseChannel(
     frequency: number,
-    targetAmplitude: number,
+    volumeRegister: number,
     mode?: number,
     restartEnvelope = false
   ) {
-    this.noiseChannel.frequency = frequency;
     this.noiseChannel.baseFrequency = frequency;
-    this.noiseChannel.baseAmplitude = targetAmplitude;
-    if (frequency <= 0 || targetAmplitude <= 0) {
+    this.applyNoiseVolumeRegister(volumeRegister);
+    if (this.chipModel === "sn76489") {
+      const tone2Frequency =
+        this.toneChannels[MkvdrvSongRuntime.PSG_TONE_CHANNELS - 1]?.frequency ?? 0;
+      this.sn76489Registers = writeSn76489NoiseControl(
+        this.sn76489Registers,
+        frequency,
+        tone2Frequency,
+        mode ?? this.noiseChannel.mode
+      );
+      this.sn76489Registers = writeSn76489Volume(
+        this.sn76489Registers,
+        3,
+        volumeRegister
+      );
+    }
+    if (frequency <= 0 || this.noiseChannel.volumeRegister <= 0) {
+      this.noiseChannel.frequency = 0;
+      this.noiseChannel.noisePeriod = 0;
+      this.noiseChannel.baseNoisePeriod = 0;
+      this.noiseChannel.frequencyMode = {
+        kind: "continuous",
+        frequency: 0,
+        period: 0
+      };
       this.noiseChannel.envelopeActive = false;
       this.noiseChannel.envelopeGain = 1;
       this.noiseChannel.pitchActive = false;
       this.noiseChannel.pitchOffset = 0;
+    } else {
+      this.refreshNoiseFrequency();
     }
     if (mode !== undefined) {
       this.noiseChannel.mode = mode;
+      this.noiseChannel.noiseControlRegister = mode;
     }
     if (restartEnvelope) {
       this.restartNoiseEnvelope();
@@ -400,14 +507,7 @@ export class MkvdrvSongRuntime {
   }
 
   private decodeEnvelopeGain(level: number): number {
-    const clamped = Math.max(0, Math.min(15, level));
-    if (clamped >= 15) {
-      return 0;
-    }
-    if (this.chipModel === "ay38910") {
-      return 10 ** (-(clamped * 1.5) / 20);
-    }
-    return 10 ** (-(clamped * 2) / 20);
+    return this.chipCore.decodeEnvelopeGain(level);
   }
 
   private refreshToneTarget(channel: ToneChannelState) {
@@ -423,25 +523,82 @@ export class MkvdrvSongRuntime {
   }
 
   private refreshToneFrequency(channel: ToneChannelState) {
-    channel.frequency = this.applyPitchOffset(
+    if (channel.baseFrequency <= 0) {
+      channel.frequency = 0;
+      channel.tonePeriod = 0;
+      return;
+    }
+
+    const targetFrequency = this.applyPitchOffset(
       channel.baseFrequency,
       channel.pitchOffset
     );
+    channel.tonePeriod = this.chipCore.tonePeriodFromFrequency(targetFrequency);
+    channel.frequency = this.chipCore.toneFrequencyFromPeriod(channel.tonePeriod);
   }
 
   private refreshNoiseFrequency() {
     if (this.noiseChannel.baseFrequency <= 0) {
       this.noiseChannel.frequency = 0;
+      this.noiseChannel.noisePeriod = 0;
+      this.noiseChannel.baseNoisePeriod = 0;
+      this.noiseChannel.frequencyMode = {
+        kind: "continuous",
+        frequency: 0,
+        period: 0
+      };
       return;
     }
 
-    this.noiseChannel.frequency = Math.max(
+    const targetFrequency = Math.max(
       1,
       this.applyPitchOffset(
         this.noiseChannel.baseFrequency,
         this.noiseChannel.pitchOffset
       )
     );
+    const tone2Frequency =
+      this.toneChannels[MkvdrvSongRuntime.PSG_TONE_CHANNELS - 1]?.frequency ?? 0;
+    if (this.chipModel === "sn76489") {
+      this.sn76489Registers = writeSn76489NoiseControl(
+        this.sn76489Registers,
+        targetFrequency,
+        tone2Frequency,
+        this.noiseChannel.mode
+      );
+      const resolved = resolveSn76489NoiseState(
+        this.sn76489Registers,
+        tone2Frequency
+      );
+      this.noiseChannel.frequencyMode = resolved.frequencyMode;
+      this.noiseChannel.baseNoisePeriod =
+        resolved.frequencyMode.kind === "continuous"
+          ? resolved.frequencyMode.period
+          : 0;
+      this.noiseChannel.noisePeriod =
+        resolved.frequencyMode.kind === "continuous"
+          ? resolved.frequencyMode.period
+          : this.toneChannels[MkvdrvSongRuntime.PSG_TONE_CHANNELS - 1]?.tonePeriod ?? 0;
+      this.noiseChannel.frequency = resolved.frequency;
+      return;
+    }
+    const frequencyMode = this.chipCore.resolveNoiseFrequencyMode(
+      targetFrequency,
+      tone2Frequency
+    );
+    this.noiseChannel.frequencyMode = frequencyMode;
+
+    if (frequencyMode.kind === "tone2") {
+      this.noiseChannel.baseNoisePeriod = 0;
+      this.noiseChannel.noisePeriod =
+        this.toneChannels[MkvdrvSongRuntime.PSG_TONE_CHANNELS - 1]?.tonePeriod ?? 0;
+      this.noiseChannel.frequency = tone2Frequency;
+      return;
+    }
+
+    this.noiseChannel.baseNoisePeriod = frequencyMode.period;
+    this.noiseChannel.noisePeriod = frequencyMode.period;
+    this.noiseChannel.frequency = frequencyMode.frequency;
   }
 
   private refreshNoiseTarget() {
@@ -632,15 +789,7 @@ export class MkvdrvSongRuntime {
   }
 
   private decodePsgAmplitude(volume: number): number {
-    const clamped = Math.max(0, Math.min(15, volume));
-
-    if (clamped === 0) {
-      return 0;
-    }
-
-    const attenuationSteps = 15 - clamped;
-    const dbPerStep = this.chipModel === "ay38910" ? 1.5 : 2;
-    return 10 ** (-(attenuationSteps * dbPerStep) / 20);
+    return this.chipCore.decodeAmplitude(volume);
   }
 
   private decodeNoiseParam(param: number): { volume: number; mode: number } {
@@ -678,9 +827,11 @@ export class MkvdrvSongRuntime {
     const previewFrequencies = [frequency, frequency * 1.5, frequency * 2];
 
     this.toneChannels.forEach((channel, index) => {
-      channel.frequency = previewFrequencies[index] ?? frequency;
       channel.baseFrequency = previewFrequencies[index] ?? frequency;
-      channel.baseAmplitude = this.decodePsgAmplitude(15);
+      channel.baseTonePeriod = this.chipCore.tonePeriodFromFrequency(
+      channel.baseFrequency
+    );
+      this.applyToneVolumeRegister(channel, 15);
       channel.panMask = MkvdrvSongRuntime.PSG_PAN_BOTH;
       channel.envelopeId = 0;
       channel.pitchEnvelopeId = 0;
@@ -688,10 +839,21 @@ export class MkvdrvSongRuntime {
       channel.pitchActive = false;
       channel.envelopeGain = 1;
       channel.envelopeActive = false;
+      this.refreshToneFrequency(channel);
       this.refreshToneTarget(channel);
     });
     this.noiseChannel.frequency = 0;
     this.noiseChannel.baseFrequency = 0;
+    this.noiseChannel.noisePeriod = 0;
+    this.noiseChannel.baseNoisePeriod = 0;
+    this.noiseChannel.frequencyMode = {
+      kind: "continuous",
+      frequency: 0,
+      period: 0
+    };
+    this.noiseChannel.volumeRegister = 0;
+    this.noiseChannel.noiseControlRegister =
+      MkvdrvSongRuntime.PSG_NOISE_MODE_WHITE;
     this.noiseChannel.baseAmplitude = 0;
     this.noiseChannel.targetAmplitude = 0;
     this.noiseChannel.panMask = MkvdrvSongRuntime.PSG_PAN_BOTH;
@@ -713,16 +875,14 @@ export class MkvdrvSongRuntime {
     const lengthTicks = this.sequenceEvents[base + 2];
     const channel = this.sequenceEvents[base + 3] ?? 0;
     const param = this.sequenceEvents[base + 4] ?? 0;
-    const toneAmplitude = this.decodePsgAmplitude(param);
     const noiseSettings = this.decodeNoiseParam(param);
-    const noiseAmplitude = this.decodePsgAmplitude(noiseSettings.volume);
 
     if (eventKind === MkvdrvSongRuntime.EVENT_NOTE_ON) {
       if (channel < MkvdrvSongRuntime.PSG_TONE_CHANNELS) {
         this.setToneChannel(
           channel,
           this.noteFrequencies[value] ?? 0,
-          toneAmplitude || this.decodePsgAmplitude(15),
+          param,
           true
         );
       }
@@ -739,12 +899,13 @@ export class MkvdrvSongRuntime {
       if (channel < MkvdrvSongRuntime.PSG_TONE_CHANNELS) {
         const toneChannel = this.toneChannels[channel];
         if (toneChannel) {
-          toneChannel.baseAmplitude = this.decodePsgAmplitude(value);
+          this.applyToneVolumeRegister(toneChannel, value);
           this.refreshToneTarget(toneChannel);
         }
       } else if (channel === MkvdrvSongRuntime.PSG_NOISE_CHANNEL) {
-        this.noiseChannel.baseAmplitude = this.decodePsgAmplitude(value);
+        this.applyNoiseVolumeRegister(value);
         this.noiseChannel.mode = param;
+        this.noiseChannel.noiseControlRegister = param;
         this.refreshNoiseTarget();
       }
     } else if (eventKind === MkvdrvSongRuntime.EVENT_ENVELOPE_SELECT) {
@@ -792,7 +953,7 @@ export class MkvdrvSongRuntime {
     } else if (eventKind === MkvdrvSongRuntime.EVENT_NOISE_ON) {
       this.setNoiseChannel(
         value,
-        noiseAmplitude || this.decodePsgAmplitude(8),
+        noiseSettings.volume,
         noiseSettings.mode,
         true
       );
@@ -904,6 +1065,30 @@ export class MkvdrvSongRuntime {
     return current + (target - current) * rate;
   }
 
+  private syncNoiseFromTone2() {
+    if (this.noiseChannel.frequencyMode.kind !== "tone2") {
+      return;
+    }
+
+    const tone2 = this.toneChannels[MkvdrvSongRuntime.PSG_TONE_CHANNELS - 1];
+    if (!tone2 || tone2.frequency <= 0) {
+      this.noiseChannel.frequency = 0;
+      this.noiseChannel.noisePeriod = 0;
+      return;
+    }
+
+    this.noiseChannel.frequency = tone2.frequency;
+    this.noiseChannel.noisePeriod = tone2.tonePeriod;
+    if (this.chipModel === "sn76489") {
+      this.sn76489Registers = writeSn76489NoiseControl(
+        this.sn76489Registers,
+        tone2.frequency,
+        tone2.frequency,
+        this.noiseChannel.mode
+      );
+    }
+  }
+
   private renderSineChannel(channel: ToneChannelState): number {
     const tableLength = this.wavetable.length;
     const phaseStep = (channel.frequency * tableLength) / this.sampleRateValue;
@@ -924,26 +1109,9 @@ export class MkvdrvSongRuntime {
   }
 
   private renderPsgToneChannel(channel: ToneChannelState): number {
-    if (this.chipModel === "ay38910") {
-      return this.renderAyToneChannel(channel);
-    }
-
     const phaseStep = channel.frequency / this.sampleRateValue;
     const cyclePhase = channel.phase - Math.floor(channel.phase);
-    const sample = cyclePhase < 0.5 ? 1 : -1;
-
-    channel.phase += phaseStep;
-    if (channel.phase >= 1) {
-      channel.phase -= Math.floor(channel.phase);
-    }
-
-    return sample;
-  }
-
-  private renderAyToneChannel(channel: ToneChannelState): number {
-    const phaseStep = channel.frequency / this.sampleRateValue;
-    const cyclePhase = channel.phase - Math.floor(channel.phase);
-    const sample = cyclePhase < 0.5 ? 0.85 : -0.85;
+    const sample = this.chipCore.renderToneSample(cyclePhase);
 
     channel.phase += phaseStep;
     if (channel.phase >= 1) {
@@ -980,30 +1148,16 @@ export class MkvdrvSongRuntime {
       this.noiseChannel.amplitude,
       this.noiseChannel.targetAmplitude
     );
-    const noiseLevel = this.chipModel === "ay38910" ? 0.07 : 0.1;
+    const noiseLevel = this.chipCore.noiseOutputLevel();
     return this.noiseChannel.output * this.noiseChannel.amplitude * noiseLevel;
   }
 
   private periodicNoiseFeedbackBit(): number {
-    if (this.chipModel === "ay38910") {
-      return (this.noiseChannel.lfsr >> 3) & 1;
-    }
-
-    return this.noiseChannel.lfsr & 1;
+    return this.chipCore.periodicNoiseFeedbackBit(this.noiseChannel.lfsr);
   }
 
   private whiteNoiseFeedbackBit(): number {
-    if (this.chipModel === "ay38910") {
-      return (
-        (this.noiseChannel.lfsr ^
-          (this.noiseChannel.lfsr >> 2) ^
-          (this.noiseChannel.lfsr >> 3) ^
-          (this.noiseChannel.lfsr >> 5)) &
-        1
-      );
-    }
-
-    return (this.noiseChannel.lfsr ^ (this.noiseChannel.lfsr >> 1)) & 1;
+    return this.chipCore.whiteNoiseFeedbackBit(this.noiseChannel.lfsr);
   }
 
   private renderMixedFrame(): { left: number; right: number } {
@@ -1026,9 +1180,7 @@ export class MkvdrvSongRuntime {
           : this.renderSineChannel(channel);
       const outputLevel =
         this.renderEngine === "psg"
-          ? this.chipModel === "ay38910"
-            ? 0.1
-            : 0.12
+          ? this.chipCore.toneOutputLevel()
           : 0.22;
       const panned = this.applyPanLevel(
         channel.panMask,
@@ -1039,6 +1191,7 @@ export class MkvdrvSongRuntime {
     });
 
     if (this.renderEngine === "psg") {
+      this.syncNoiseFromTone2();
       const pannedNoise = this.applyPanLevel(
         this.noiseChannel.panMask,
         this.renderNoiseChannel()

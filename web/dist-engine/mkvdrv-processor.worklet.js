@@ -1,5 +1,303 @@
 "use strict";
 (() => {
+  // src/chips/ay38910-core.ts
+  var DB_PER_STEP = 1.5;
+  var MASTER_CLOCK_HZ = 1789773;
+  var TONE_DIVIDER = 16;
+  var NOISE_DIVIDER = 16;
+  var MIN_PERIOD = 1;
+  var MAX_TONE_PERIOD = 4095;
+  var MAX_NOISE_PERIOD = 31;
+  function clampNibble(value) {
+    return Math.max(0, Math.min(15, value));
+  }
+  function clampPeriod(value, max) {
+    return Math.max(MIN_PERIOD, Math.min(max, Math.round(value)));
+  }
+  var ay38910Core = {
+    chipModel: "ay38910",
+    decodeEnvelopeGain(level) {
+      const clamped = clampNibble(level);
+      if (clamped >= 15) {
+        return 0;
+      }
+      return 10 ** (-(clamped * DB_PER_STEP) / 20);
+    },
+    decodeAmplitude(volume) {
+      const clamped = clampNibble(volume);
+      if (clamped === 0) {
+        return 0;
+      }
+      const attenuationSteps = 15 - clamped;
+      return 10 ** (-(attenuationSteps * DB_PER_STEP) / 20);
+    },
+    toneOutputLevel() {
+      return 0.1;
+    },
+    noiseOutputLevel() {
+      return 0.07;
+    },
+    tonePeriodFromFrequency(frequency) {
+      if (frequency <= 0) {
+        return 0;
+      }
+      return clampPeriod(MASTER_CLOCK_HZ / (TONE_DIVIDER * frequency), MAX_TONE_PERIOD);
+    },
+    toneFrequencyFromPeriod(period) {
+      if (period <= 0) {
+        return 0;
+      }
+      return MASTER_CLOCK_HZ / (TONE_DIVIDER * clampPeriod(period, MAX_TONE_PERIOD));
+    },
+    noisePeriodFromFrequency(frequency) {
+      if (frequency <= 0) {
+        return 0;
+      }
+      return clampPeriod(MASTER_CLOCK_HZ / (NOISE_DIVIDER * frequency), MAX_NOISE_PERIOD);
+    },
+    noiseFrequencyFromPeriod(period) {
+      if (period <= 0) {
+        return 0;
+      }
+      return MASTER_CLOCK_HZ / (NOISE_DIVIDER * clampPeriod(period, MAX_NOISE_PERIOD));
+    },
+    resolveNoiseFrequencyMode(targetFrequency, _tone2Frequency) {
+      if (targetFrequency <= 0) {
+        return {
+          kind: "continuous",
+          frequency: 0,
+          period: 0
+        };
+      }
+      const period = clampPeriod(
+        MASTER_CLOCK_HZ / (NOISE_DIVIDER * targetFrequency),
+        MAX_NOISE_PERIOD
+      );
+      return {
+        kind: "continuous",
+        frequency: MASTER_CLOCK_HZ / (NOISE_DIVIDER * period),
+        period
+      };
+    },
+    renderToneSample(phase) {
+      return phase < 0.5 ? 0.85 : -0.85;
+    },
+    periodicNoiseFeedbackBit(lfsr) {
+      return lfsr >> 3 & 1;
+    },
+    whiteNoiseFeedbackBit(lfsr) {
+      return (lfsr ^ lfsr >> 2 ^ lfsr >> 3 ^ lfsr >> 5) & 1;
+    }
+  };
+
+  // src/chips/sn76489-core.ts
+  var DB_PER_STEP2 = 2;
+  var MASTER_CLOCK_HZ2 = 3579545;
+  var TONE_DIVIDER2 = 32;
+  var NOISE_DIVIDER2 = 32;
+  var MIN_PERIOD2 = 1;
+  var MAX_TONE_PERIOD2 = 1023;
+  var MAX_NOISE_PERIOD2 = 1023;
+  var DISCRETE_NOISE_PERIODS = [16, 32, 64];
+  function clampNibble2(value) {
+    return Math.max(0, Math.min(15, value));
+  }
+  function clampPeriod2(value, max) {
+    return Math.max(MIN_PERIOD2, Math.min(max, Math.round(value)));
+  }
+  function discreteNoiseModeFromFrequency(targetFrequency, tone2Frequency) {
+    if (targetFrequency <= 0) {
+      return {
+        kind: "continuous",
+        frequency: 0,
+        period: 0
+      };
+    }
+    const fixedCandidates = DISCRETE_NOISE_PERIODS.map((period) => {
+      const frequency = MASTER_CLOCK_HZ2 / (NOISE_DIVIDER2 * period);
+      return {
+        kind: "continuous",
+        frequency,
+        period
+      };
+    });
+    const candidates = fixedCandidates.map((candidate) => ({
+      ...candidate,
+      distance: Math.abs(candidate.frequency - targetFrequency)
+    }));
+    if (tone2Frequency > 0) {
+      candidates.push({
+        kind: "tone2",
+        distance: Math.abs(tone2Frequency - targetFrequency)
+      });
+    }
+    candidates.sort((left, right) => left.distance - right.distance);
+    const best = candidates[0];
+    if (!best) {
+      return {
+        kind: "continuous",
+        frequency: 0,
+        period: 0
+      };
+    }
+    if (best.kind === "tone2") {
+      return { kind: "tone2" };
+    }
+    return {
+      kind: "continuous",
+      frequency: best.frequency,
+      period: best.period
+    };
+  }
+  function frequencyForNoiseSource(source, tone2Frequency) {
+    if (source === "tone2") {
+      return Math.max(0, tone2Frequency);
+    }
+    const period = source === "clock_div_512" ? DISCRETE_NOISE_PERIODS[0] : source === "clock_div_1024" ? DISCRETE_NOISE_PERIODS[1] : DISCRETE_NOISE_PERIODS[2];
+    return MASTER_CLOCK_HZ2 / (NOISE_DIVIDER2 * period);
+  }
+  function sourceForDiscretePeriod(period) {
+    if (period <= DISCRETE_NOISE_PERIODS[0]) {
+      return "clock_div_512";
+    }
+    if (period <= DISCRETE_NOISE_PERIODS[1]) {
+      return "clock_div_1024";
+    }
+    return "clock_div_2048";
+  }
+  function createSn76489RegisterState() {
+    return {
+      tonePeriods: [0, 0, 0],
+      volumeRegisters: [0, 0, 0, 0],
+      noiseMode: 1,
+      noiseSource: "clock_div_1024",
+      latchedRegister: 0
+    };
+  }
+  function writeSn76489TonePeriod(state, channel, period) {
+    const next = {
+      ...state,
+      tonePeriods: [...state.tonePeriods],
+      volumeRegisters: [...state.volumeRegisters],
+      latchedRegister: channel * 2
+    };
+    next.tonePeriods[channel] = clampPeriod2(period, MAX_TONE_PERIOD2);
+    return next;
+  }
+  function writeSn76489Volume(state, channel, volume) {
+    const next = {
+      ...state,
+      tonePeriods: [...state.tonePeriods],
+      volumeRegisters: [...state.volumeRegisters],
+      latchedRegister: channel * 2 + 1
+    };
+    next.volumeRegisters[channel] = clampNibble2(volume);
+    return next;
+  }
+  function writeSn76489NoiseControl(state, targetFrequency, tone2Frequency, noiseMode) {
+    const resolved = discreteNoiseModeFromFrequency(targetFrequency, tone2Frequency);
+    const next = {
+      ...state,
+      tonePeriods: [...state.tonePeriods],
+      volumeRegisters: [...state.volumeRegisters],
+      latchedRegister: 6
+    };
+    next.noiseMode = noiseMode;
+    if (resolved.kind === "tone2") {
+      next.noiseSource = "tone2";
+      return next;
+    }
+    next.noiseSource = sourceForDiscretePeriod(resolved.period);
+    return next;
+  }
+  function resolveSn76489NoiseState(state, tone2Frequency) {
+    if (state.noiseSource === "tone2") {
+      return {
+        frequency: Math.max(0, tone2Frequency),
+        frequencyMode: { kind: "tone2" }
+      };
+    }
+    const frequency = frequencyForNoiseSource(state.noiseSource, tone2Frequency);
+    const period = state.noiseSource === "clock_div_512" ? DISCRETE_NOISE_PERIODS[0] : state.noiseSource === "clock_div_1024" ? DISCRETE_NOISE_PERIODS[1] : DISCRETE_NOISE_PERIODS[2];
+    return {
+      frequency,
+      frequencyMode: {
+        kind: "continuous",
+        frequency,
+        period
+      }
+    };
+  }
+  var sn76489Core = {
+    chipModel: "sn76489",
+    decodeEnvelopeGain(level) {
+      const clamped = clampNibble2(level);
+      if (clamped >= 15) {
+        return 0;
+      }
+      return 10 ** (-(clamped * DB_PER_STEP2) / 20);
+    },
+    decodeAmplitude(volume) {
+      const clamped = clampNibble2(volume);
+      if (clamped === 0) {
+        return 0;
+      }
+      const attenuationSteps = 15 - clamped;
+      return 10 ** (-(attenuationSteps * DB_PER_STEP2) / 20);
+    },
+    toneOutputLevel() {
+      return 0.12;
+    },
+    noiseOutputLevel() {
+      return 0.1;
+    },
+    tonePeriodFromFrequency(frequency) {
+      if (frequency <= 0) {
+        return 0;
+      }
+      return clampPeriod2(MASTER_CLOCK_HZ2 / (TONE_DIVIDER2 * frequency), MAX_TONE_PERIOD2);
+    },
+    toneFrequencyFromPeriod(period) {
+      if (period <= 0) {
+        return 0;
+      }
+      return MASTER_CLOCK_HZ2 / (TONE_DIVIDER2 * clampPeriod2(period, MAX_TONE_PERIOD2));
+    },
+    noisePeriodFromFrequency(frequency) {
+      if (frequency <= 0) {
+        return 0;
+      }
+      return clampPeriod2(MASTER_CLOCK_HZ2 / (NOISE_DIVIDER2 * frequency), MAX_NOISE_PERIOD2);
+    },
+    noiseFrequencyFromPeriod(period) {
+      if (period <= 0) {
+        return 0;
+      }
+      return MASTER_CLOCK_HZ2 / (NOISE_DIVIDER2 * clampPeriod2(period, MAX_NOISE_PERIOD2));
+    },
+    resolveNoiseFrequencyMode(targetFrequency, tone2Frequency) {
+      return discreteNoiseModeFromFrequency(targetFrequency, tone2Frequency);
+    },
+    renderToneSample(phase) {
+      return phase < 0.5 ? 1 : -1;
+    },
+    periodicNoiseFeedbackBit(lfsr) {
+      return lfsr & 1;
+    },
+    whiteNoiseFeedbackBit(lfsr) {
+      return (lfsr ^ lfsr >> 1) & 1;
+    }
+  };
+
+  // src/chips/index.ts
+  var CHIP_CORES = {
+    sn76489: sn76489Core,
+    ay38910: ay38910Core
+  };
+  function getPsgChipCore(chipModel) {
+    return CHIP_CORES[chipModel] ?? sn76489Core;
+  }
+
   // src/song-runtime.ts
   var MkvdrvSongRuntime = class _MkvdrvSongRuntime {
     constructor(sampleRateValue) {
@@ -50,6 +348,10 @@
     pitchEnvelopes = /* @__PURE__ */ new Map();
     toneChannels = [];
     noiseChannel;
+    sn76489Registers = createSn76489RegisterState();
+    get chipCore() {
+      return getPsgChipCore(this.chipModel);
+    }
     configure({
       renderEngine,
       chipModel,
@@ -188,6 +490,9 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
         phase: 0,
         frequency: 0,
         baseFrequency: 0,
+        tonePeriod: 0,
+        baseTonePeriod: 0,
+        volumeRegister: 0,
         amplitude: 0,
         targetAmplitude: 0,
         baseAmplitude: 0,
@@ -209,6 +514,15 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
         phase: 0,
         frequency: 0,
         baseFrequency: 0,
+        noisePeriod: 0,
+        baseNoisePeriod: 0,
+        frequencyMode: {
+          kind: "continuous",
+          frequency: 0,
+          period: 0
+        },
+        volumeRegister: 0,
+        noiseControlRegister: _MkvdrvSongRuntime.PSG_NOISE_MODE_WHITE,
         amplitude: 0,
         targetAmplitude: 0,
         lfsr: 16384,
@@ -234,34 +548,77 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
         () => this.createToneChannel()
       );
       this.noiseChannel = this.createNoiseChannel();
+      this.sn76489Registers = createSn76489RegisterState();
     }
     silenceAllChannels() {
       this.toneChannels.forEach((channel) => {
         channel.targetAmplitude = 0;
         channel.baseAmplitude = 0;
         channel.frequency = 0;
+        channel.tonePeriod = 0;
+        channel.baseTonePeriod = 0;
+        channel.volumeRegister = 0;
         channel.envelopeActive = false;
         channel.envelopeGain = 1;
       });
       this.noiseChannel.targetAmplitude = 0;
       this.noiseChannel.baseAmplitude = 0;
       this.noiseChannel.frequency = 0;
+      this.noiseChannel.noisePeriod = 0;
+      this.noiseChannel.baseNoisePeriod = 0;
+      this.noiseChannel.frequencyMode = {
+        kind: "continuous",
+        frequency: 0,
+        period: 0
+      };
+      this.noiseChannel.volumeRegister = 0;
+      this.noiseChannel.noiseControlRegister = _MkvdrvSongRuntime.PSG_NOISE_MODE_WHITE;
       this.noiseChannel.envelopeActive = false;
       this.noiseChannel.envelopeGain = 1;
     }
-    setToneChannel(channelIndex, frequency, targetAmplitude, restartEnvelope = false) {
+    normalizeVolumeRegister(value) {
+      return Math.max(0, Math.min(15, Math.round(value)));
+    }
+    applyToneVolumeRegister(channel, value) {
+      channel.volumeRegister = this.normalizeVolumeRegister(value);
+      channel.baseAmplitude = this.decodePsgAmplitude(channel.volumeRegister);
+    }
+    applyNoiseVolumeRegister(value) {
+      this.noiseChannel.volumeRegister = this.normalizeVolumeRegister(value);
+      this.noiseChannel.baseAmplitude = this.decodePsgAmplitude(
+        this.noiseChannel.volumeRegister
+      );
+    }
+    setToneChannel(channelIndex, frequency, volumeRegister, restartEnvelope = false) {
       const channel = this.toneChannels[channelIndex];
       if (!channel) {
         return;
       }
-      channel.frequency = frequency;
       channel.baseFrequency = frequency;
-      channel.baseAmplitude = targetAmplitude;
-      if (frequency <= 0 || targetAmplitude <= 0) {
+      channel.baseTonePeriod = this.chipCore.tonePeriodFromFrequency(frequency);
+      if (this.chipModel === "sn76489" && channelIndex <= 2) {
+        this.sn76489Registers = writeSn76489TonePeriod(
+          this.sn76489Registers,
+          channelIndex,
+          channel.baseTonePeriod
+        );
+        this.sn76489Registers = writeSn76489Volume(
+          this.sn76489Registers,
+          channelIndex,
+          volumeRegister
+        );
+      }
+      this.applyToneVolumeRegister(channel, volumeRegister);
+      if (frequency <= 0 || channel.volumeRegister <= 0) {
+        channel.frequency = 0;
+        channel.tonePeriod = 0;
+        channel.baseTonePeriod = 0;
         channel.envelopeActive = false;
         channel.envelopeGain = 1;
         channel.pitchActive = false;
         channel.pitchOffset = 0;
+      } else {
+        this.refreshToneFrequency(channel);
       }
       if (restartEnvelope) {
         this.restartToneEnvelope(channel);
@@ -269,18 +626,42 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
       }
       this.refreshToneTarget(channel);
     }
-    setNoiseChannel(frequency, targetAmplitude, mode, restartEnvelope = false) {
-      this.noiseChannel.frequency = frequency;
+    setNoiseChannel(frequency, volumeRegister, mode, restartEnvelope = false) {
       this.noiseChannel.baseFrequency = frequency;
-      this.noiseChannel.baseAmplitude = targetAmplitude;
-      if (frequency <= 0 || targetAmplitude <= 0) {
+      this.applyNoiseVolumeRegister(volumeRegister);
+      if (this.chipModel === "sn76489") {
+        const tone2Frequency = this.toneChannels[_MkvdrvSongRuntime.PSG_TONE_CHANNELS - 1]?.frequency ?? 0;
+        this.sn76489Registers = writeSn76489NoiseControl(
+          this.sn76489Registers,
+          frequency,
+          tone2Frequency,
+          mode ?? this.noiseChannel.mode
+        );
+        this.sn76489Registers = writeSn76489Volume(
+          this.sn76489Registers,
+          3,
+          volumeRegister
+        );
+      }
+      if (frequency <= 0 || this.noiseChannel.volumeRegister <= 0) {
+        this.noiseChannel.frequency = 0;
+        this.noiseChannel.noisePeriod = 0;
+        this.noiseChannel.baseNoisePeriod = 0;
+        this.noiseChannel.frequencyMode = {
+          kind: "continuous",
+          frequency: 0,
+          period: 0
+        };
         this.noiseChannel.envelopeActive = false;
         this.noiseChannel.envelopeGain = 1;
         this.noiseChannel.pitchActive = false;
         this.noiseChannel.pitchOffset = 0;
+      } else {
+        this.refreshNoiseFrequency();
       }
       if (mode !== void 0) {
         this.noiseChannel.mode = mode;
+        this.noiseChannel.noiseControlRegister = mode;
       }
       if (restartEnvelope) {
         this.restartNoiseEnvelope();
@@ -294,14 +675,7 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
       }
     }
     decodeEnvelopeGain(level) {
-      const clamped = Math.max(0, Math.min(15, level));
-      if (clamped >= 15) {
-        return 0;
-      }
-      if (this.chipModel === "ay38910") {
-        return 10 ** (-(clamped * 1.5) / 20);
-      }
-      return 10 ** (-(clamped * 2) / 20);
+      return this.chipCore.decodeEnvelopeGain(level);
     }
     refreshToneTarget(channel) {
       channel.targetAmplitude = channel.baseAmplitude * channel.envelopeGain;
@@ -313,23 +687,69 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
       return baseFrequency * 2 ** (offset / 1200);
     }
     refreshToneFrequency(channel) {
-      channel.frequency = this.applyPitchOffset(
+      if (channel.baseFrequency <= 0) {
+        channel.frequency = 0;
+        channel.tonePeriod = 0;
+        return;
+      }
+      const targetFrequency = this.applyPitchOffset(
         channel.baseFrequency,
         channel.pitchOffset
       );
+      channel.tonePeriod = this.chipCore.tonePeriodFromFrequency(targetFrequency);
+      channel.frequency = this.chipCore.toneFrequencyFromPeriod(channel.tonePeriod);
     }
     refreshNoiseFrequency() {
       if (this.noiseChannel.baseFrequency <= 0) {
         this.noiseChannel.frequency = 0;
+        this.noiseChannel.noisePeriod = 0;
+        this.noiseChannel.baseNoisePeriod = 0;
+        this.noiseChannel.frequencyMode = {
+          kind: "continuous",
+          frequency: 0,
+          period: 0
+        };
         return;
       }
-      this.noiseChannel.frequency = Math.max(
+      const targetFrequency = Math.max(
         1,
         this.applyPitchOffset(
           this.noiseChannel.baseFrequency,
           this.noiseChannel.pitchOffset
         )
       );
+      const tone2Frequency = this.toneChannels[_MkvdrvSongRuntime.PSG_TONE_CHANNELS - 1]?.frequency ?? 0;
+      if (this.chipModel === "sn76489") {
+        this.sn76489Registers = writeSn76489NoiseControl(
+          this.sn76489Registers,
+          targetFrequency,
+          tone2Frequency,
+          this.noiseChannel.mode
+        );
+        const resolved = resolveSn76489NoiseState(
+          this.sn76489Registers,
+          tone2Frequency
+        );
+        this.noiseChannel.frequencyMode = resolved.frequencyMode;
+        this.noiseChannel.baseNoisePeriod = resolved.frequencyMode.kind === "continuous" ? resolved.frequencyMode.period : 0;
+        this.noiseChannel.noisePeriod = resolved.frequencyMode.kind === "continuous" ? resolved.frequencyMode.period : this.toneChannels[_MkvdrvSongRuntime.PSG_TONE_CHANNELS - 1]?.tonePeriod ?? 0;
+        this.noiseChannel.frequency = resolved.frequency;
+        return;
+      }
+      const frequencyMode = this.chipCore.resolveNoiseFrequencyMode(
+        targetFrequency,
+        tone2Frequency
+      );
+      this.noiseChannel.frequencyMode = frequencyMode;
+      if (frequencyMode.kind === "tone2") {
+        this.noiseChannel.baseNoisePeriod = 0;
+        this.noiseChannel.noisePeriod = this.toneChannels[_MkvdrvSongRuntime.PSG_TONE_CHANNELS - 1]?.tonePeriod ?? 0;
+        this.noiseChannel.frequency = tone2Frequency;
+        return;
+      }
+      this.noiseChannel.baseNoisePeriod = frequencyMode.period;
+      this.noiseChannel.noisePeriod = frequencyMode.period;
+      this.noiseChannel.frequency = frequencyMode.frequency;
     }
     refreshNoiseTarget() {
       this.noiseChannel.targetAmplitude = this.noiseChannel.baseAmplitude * this.noiseChannel.envelopeGain;
@@ -488,13 +908,7 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
       this.refreshNoiseTarget();
     }
     decodePsgAmplitude(volume) {
-      const clamped = Math.max(0, Math.min(15, volume));
-      if (clamped === 0) {
-        return 0;
-      }
-      const attenuationSteps = 15 - clamped;
-      const dbPerStep = this.chipModel === "ay38910" ? 1.5 : 2;
-      return 10 ** (-(attenuationSteps * dbPerStep) / 20);
+      return this.chipCore.decodeAmplitude(volume);
     }
     decodeNoiseParam(param) {
       if (param > 255) {
@@ -521,9 +935,11 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
     configureTonePreviewVoices(frequency) {
       const previewFrequencies = [frequency, frequency * 1.5, frequency * 2];
       this.toneChannels.forEach((channel, index) => {
-        channel.frequency = previewFrequencies[index] ?? frequency;
         channel.baseFrequency = previewFrequencies[index] ?? frequency;
-        channel.baseAmplitude = this.decodePsgAmplitude(15);
+        channel.baseTonePeriod = this.chipCore.tonePeriodFromFrequency(
+          channel.baseFrequency
+        );
+        this.applyToneVolumeRegister(channel, 15);
         channel.panMask = _MkvdrvSongRuntime.PSG_PAN_BOTH;
         channel.envelopeId = 0;
         channel.pitchEnvelopeId = 0;
@@ -531,10 +947,20 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
         channel.pitchActive = false;
         channel.envelopeGain = 1;
         channel.envelopeActive = false;
+        this.refreshToneFrequency(channel);
         this.refreshToneTarget(channel);
       });
       this.noiseChannel.frequency = 0;
       this.noiseChannel.baseFrequency = 0;
+      this.noiseChannel.noisePeriod = 0;
+      this.noiseChannel.baseNoisePeriod = 0;
+      this.noiseChannel.frequencyMode = {
+        kind: "continuous",
+        frequency: 0,
+        period: 0
+      };
+      this.noiseChannel.volumeRegister = 0;
+      this.noiseChannel.noiseControlRegister = _MkvdrvSongRuntime.PSG_NOISE_MODE_WHITE;
       this.noiseChannel.baseAmplitude = 0;
       this.noiseChannel.targetAmplitude = 0;
       this.noiseChannel.panMask = _MkvdrvSongRuntime.PSG_PAN_BOTH;
@@ -554,15 +980,13 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
       const lengthTicks = this.sequenceEvents[base + 2];
       const channel = this.sequenceEvents[base + 3] ?? 0;
       const param = this.sequenceEvents[base + 4] ?? 0;
-      const toneAmplitude = this.decodePsgAmplitude(param);
       const noiseSettings = this.decodeNoiseParam(param);
-      const noiseAmplitude = this.decodePsgAmplitude(noiseSettings.volume);
       if (eventKind === _MkvdrvSongRuntime.EVENT_NOTE_ON) {
         if (channel < _MkvdrvSongRuntime.PSG_TONE_CHANNELS) {
           this.setToneChannel(
             channel,
             this.noteFrequencies[value] ?? 0,
-            toneAmplitude || this.decodePsgAmplitude(15),
+            param,
             true
           );
         }
@@ -579,12 +1003,13 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
         if (channel < _MkvdrvSongRuntime.PSG_TONE_CHANNELS) {
           const toneChannel = this.toneChannels[channel];
           if (toneChannel) {
-            toneChannel.baseAmplitude = this.decodePsgAmplitude(value);
+            this.applyToneVolumeRegister(toneChannel, value);
             this.refreshToneTarget(toneChannel);
           }
         } else if (channel === _MkvdrvSongRuntime.PSG_NOISE_CHANNEL) {
-          this.noiseChannel.baseAmplitude = this.decodePsgAmplitude(value);
+          this.applyNoiseVolumeRegister(value);
           this.noiseChannel.mode = param;
+          this.noiseChannel.noiseControlRegister = param;
           this.refreshNoiseTarget();
         }
       } else if (eventKind === _MkvdrvSongRuntime.EVENT_ENVELOPE_SELECT) {
@@ -632,7 +1057,7 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
       } else if (eventKind === _MkvdrvSongRuntime.EVENT_NOISE_ON) {
         this.setNoiseChannel(
           value,
-          noiseAmplitude || this.decodePsgAmplitude(8),
+          noiseSettings.volume,
           noiseSettings.mode,
           true
         );
@@ -724,6 +1149,27 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
       const rate = target > current ? this.attackRate : this.releaseRate;
       return current + (target - current) * rate;
     }
+    syncNoiseFromTone2() {
+      if (this.noiseChannel.frequencyMode.kind !== "tone2") {
+        return;
+      }
+      const tone2 = this.toneChannels[_MkvdrvSongRuntime.PSG_TONE_CHANNELS - 1];
+      if (!tone2 || tone2.frequency <= 0) {
+        this.noiseChannel.frequency = 0;
+        this.noiseChannel.noisePeriod = 0;
+        return;
+      }
+      this.noiseChannel.frequency = tone2.frequency;
+      this.noiseChannel.noisePeriod = tone2.tonePeriod;
+      if (this.chipModel === "sn76489") {
+        this.sn76489Registers = writeSn76489NoiseControl(
+          this.sn76489Registers,
+          tone2.frequency,
+          tone2.frequency,
+          this.noiseChannel.mode
+        );
+      }
+    }
     renderSineChannel(channel) {
       const tableLength = this.wavetable.length;
       const phaseStep = channel.frequency * tableLength / this.sampleRateValue;
@@ -738,22 +1184,9 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
       return sample;
     }
     renderPsgToneChannel(channel) {
-      if (this.chipModel === "ay38910") {
-        return this.renderAyToneChannel(channel);
-      }
       const phaseStep = channel.frequency / this.sampleRateValue;
       const cyclePhase = channel.phase - Math.floor(channel.phase);
-      const sample = cyclePhase < 0.5 ? 1 : -1;
-      channel.phase += phaseStep;
-      if (channel.phase >= 1) {
-        channel.phase -= Math.floor(channel.phase);
-      }
-      return sample;
-    }
-    renderAyToneChannel(channel) {
-      const phaseStep = channel.frequency / this.sampleRateValue;
-      const cyclePhase = channel.phase - Math.floor(channel.phase);
-      const sample = cyclePhase < 0.5 ? 0.85 : -0.85;
+      const sample = this.chipCore.renderToneSample(cyclePhase);
       channel.phase += phaseStep;
       if (channel.phase >= 1) {
         channel.phase -= Math.floor(channel.phase);
@@ -777,20 +1210,14 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
         this.noiseChannel.amplitude,
         this.noiseChannel.targetAmplitude
       );
-      const noiseLevel = this.chipModel === "ay38910" ? 0.07 : 0.1;
+      const noiseLevel = this.chipCore.noiseOutputLevel();
       return this.noiseChannel.output * this.noiseChannel.amplitude * noiseLevel;
     }
     periodicNoiseFeedbackBit() {
-      if (this.chipModel === "ay38910") {
-        return this.noiseChannel.lfsr >> 3 & 1;
-      }
-      return this.noiseChannel.lfsr & 1;
+      return this.chipCore.periodicNoiseFeedbackBit(this.noiseChannel.lfsr);
     }
     whiteNoiseFeedbackBit() {
-      if (this.chipModel === "ay38910") {
-        return (this.noiseChannel.lfsr ^ this.noiseChannel.lfsr >> 2 ^ this.noiseChannel.lfsr >> 3 ^ this.noiseChannel.lfsr >> 5) & 1;
-      }
-      return (this.noiseChannel.lfsr ^ this.noiseChannel.lfsr >> 1) & 1;
+      return this.chipCore.whiteNoiseFeedbackBit(this.noiseChannel.lfsr);
     }
     renderMixedFrame() {
       let left = 0;
@@ -804,7 +1231,7 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
           return;
         }
         const sample = this.renderEngine === "psg" ? this.renderPsgToneChannel(channel) : this.renderSineChannel(channel);
-        const outputLevel = this.renderEngine === "psg" ? this.chipModel === "ay38910" ? 0.1 : 0.12 : 0.22;
+        const outputLevel = this.renderEngine === "psg" ? this.chipCore.toneOutputLevel() : 0.22;
         const panned = this.applyPanLevel(
           channel.panMask,
           sample * channel.amplitude * outputLevel
@@ -813,6 +1240,7 @@ Tempo: ${this.bpm.toFixed(0)} BPM, events: ${this.sequenceEvents.length / this.e
         right += panned.right;
       });
       if (this.renderEngine === "psg") {
+        this.syncNoiseFromTone2();
         const pannedNoise = this.applyPanLevel(
           this.noiseChannel.panMask,
           this.renderNoiseChannel()

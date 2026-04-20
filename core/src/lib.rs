@@ -1091,7 +1091,7 @@ mod tests {
         );
         assert_eq!(
             unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 3 + 1] },
-            36
+            48
         );
         assert_eq!(unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 3 + 3] }, 0);
         assert_eq!(
@@ -1188,7 +1188,7 @@ mod tests {
         assert_eq!(event_count, 4);
         assert_eq!(
             unsafe { SEQUENCE_EVENTS[SEQUENCE_EVENT_STRIDE * 2 + 1] },
-            40
+            52
         );
 
         mkvdrv_set_conditional_branch_index(0);
